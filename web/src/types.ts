@@ -1,4 +1,6 @@
 export type AgentConfig = { model?: string; effort?: string };
+export type AgentMessage = { id: string; text: string; at: string };
+export type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
 export type Capability = { available: boolean; reason?: string };
 export type AgentCapabilities = {
   observe: Capability;
@@ -22,6 +24,11 @@ export type AgentState = {
   requested?: AgentConfig & { prompt?: string };
   effective?: AgentConfig;
   latestActivity?: { tool: string; status: string };
+  task?: string;
+  latestMessage?: string;
+  messages?: AgentMessage[];
+  messageCount?: number;
+  streamingMessage?: StreamingAgentMessage;
   startedAt?: string;
   lastActivityAt?: string;
 };
@@ -47,4 +54,20 @@ export type RunSnapshot = {
   adapter?: AdapterDescriptor;
   capabilities?: Record<string, AgentCapabilities>;
 };
-export type DashboardState = { connected: boolean; snapshot: RunSnapshot; message?: string };
+export type RunListItem = {
+  runId: string;
+  projectName: string;
+  cwd: string;
+  startedAt: string;
+  adapter: AdapterDescriptor;
+  agents: number;
+  activeAgents: number;
+  objective?: string;
+};
+export type DashboardState = {
+  connected: boolean;
+  snapshot: RunSnapshot;
+  message?: string;
+  runs: RunListItem[];
+  selectedRunId?: string;
+};

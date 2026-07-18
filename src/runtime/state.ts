@@ -3,6 +3,8 @@ import type { AdapterDescriptor, AgentCapabilities } from "../adapters/types.js"
 import type { WatchdogEvent } from "../codex/normalizer.js";
 
 export type AgentConfig = { model?: string; effort?: string };
+export type AgentMessage = { id: string; text: string; at: string };
+export type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
 
 export type AgentState = {
   threadId: string;
@@ -17,6 +19,11 @@ export type AgentState = {
   requested?: AgentConfig & { prompt?: string };
   effective?: AgentConfig;
   latestActivity?: { tool: string; status: string };
+  task?: string;
+  latestMessage?: string;
+  messages?: AgentMessage[];
+  messageCount?: number;
+  streamingMessage?: StreamingAgentMessage;
   startedAt?: string;
   lastActivityAt?: string;
 };
@@ -72,17 +79,51 @@ export class RuntimeState extends EventEmitter {
         agent.activeTurnId = event.turnId;
         agent.status = "active";
         agent.lastActivityAt = new Date().toISOString();
-        if (!agent.parentThreadId || this.#loops.has(event.threadId)) {
-          const loop = this.#loop(event.threadId);
+        const loop = this.#loops.get(event.threadId);
+        if (loop) {
           loop.iteration += 1;
           loop.activeTurnId = event.turnId;
           loop.phase = "execute";
         }
         break;
       }
+      case "turn.input": {
+        const agent = this.#ensure(event.threadId);
+        agent.task = event.input;
+        agent.lastActivityAt = new Date().toISOString();
+        break;
+      }
+      case "agent.message.delta": {
+        const agent = this.#ensure(event.threadId);
+        const at = event.at ?? new Date().toISOString();
+        if (agent.streamingMessage?.itemId === event.itemId) {
+          agent.streamingMessage.text += event.delta;
+          agent.streamingMessage.updatedAt = at;
+        } else {
+          agent.streamingMessage = { itemId: event.itemId, text: event.delta, startedAt: at, updatedAt: at };
+        }
+        agent.lastActivityAt = at;
+        break;
+      }
+      case "agent.message": {
+        const agent = this.#ensure(event.threadId);
+        const at = event.at ?? new Date().toISOString();
+        const messages = agent.messages ??= [];
+        const messageCount = agent.messageCount ?? 0;
+        const id = event.itemId ?? `${event.threadId}:message:${messageCount + 1}`;
+        if (messages.some((message) => message.id === id)) break;
+        messages.push({ id, text: event.message, at });
+        agent.messageCount = messageCount + 1;
+        if (messages.length > MAX_AGENT_MESSAGES) messages.splice(0, messages.length - MAX_AGENT_MESSAGES);
+        agent.latestMessage = event.message;
+        if (agent.streamingMessage?.itemId === event.itemId) agent.streamingMessage = undefined;
+        agent.lastActivityAt = at;
+        break;
+      }
       case "turn.completed": {
         const agent = this.#ensure(event.threadId);
         if (agent.activeTurnId === event.turnId) agent.activeTurnId = undefined;
+        agent.streamingMessage = undefined;
         agent.lastActivityAt = new Date().toISOString();
         const loop = this.#loops.get(event.threadId);
         if (loop?.activeTurnId === event.turnId) {
@@ -93,7 +134,11 @@ export class RuntimeState extends EventEmitter {
       }
       case "loop.objective": {
         const agent = this.#ensure(event.threadId);
-        if (!agent.parentThreadId) this.#loop(event.threadId).objective = event.objective;
+        if (!agent.parentThreadId) {
+          const loop = this.#loop(event.threadId);
+          loop.objective = event.objective;
+          this.#activateLoop(loop, agent, event.turnId);
+        }
         break;
       }
       case "agent.spawned": {
@@ -133,26 +178,19 @@ export class RuntimeState extends EventEmitter {
         break;
       }
       case "loop.configured": {
+        const agent = this.#ensure(event.threadId);
         const loop = this.#loop(event.threadId);
         loop.objective = event.objective ?? loop.objective;
         loop.verifier = event.verifier ?? loop.verifier;
         loop.budget.maxTokens = event.maxTokens ?? loop.budget.maxTokens;
         loop.budget.maxIterations = event.maxIterations ?? loop.budget.maxIterations;
-        if (loop.phase === "plan" && loop.activeTurnId) loop.phase = "execute";
+        if (agent.activeTurnId) this.#activateLoop(loop, agent, agent.activeTurnId);
         break;
       }
       case "evidence.collected": {
         const loop = this.#owningLoop(event.threadId);
         if (!loop) break;
-        const id = event.itemId ?? `${event.threadId}:${loop.iteration}:${event.summary}`;
-        if (!loop.evidence.some((item) => item.id === id)) loop.evidence.push({
-          id,
-          iteration: loop.iteration,
-          summary: event.summary,
-          source: event.source,
-          agentThreadId: event.threadId,
-          at: new Date().toISOString(),
-        });
+        this.#addEvidence(loop, event.threadId, event.summary, event.source, event.itemId);
         break;
       }
       case "loop.verified": {
@@ -166,7 +204,12 @@ export class RuntimeState extends EventEmitter {
   }
 
   snapshot(): RunSnapshot {
-    const agents = [...this.#agents.values()];
+    const agents = [...this.#agents.values()].map((agent) => ({
+      ...agent,
+      messages: (agent.messages ?? []).map((message) => ({ ...message })),
+      messageCount: agent.messageCount ?? agent.messages?.length ?? 0,
+      streamingMessage: agent.streamingMessage ? { ...agent.streamingMessage } : undefined,
+    }));
     return { startedAt: this.startedAt, mode: this.mode, agents, loops: [...this.#loops.values()].map((loop) => ({
       ...loop,
       evidence: [...loop.evidence],
@@ -242,7 +285,7 @@ export class RuntimeState extends EventEmitter {
   #ensure(threadId: string): AgentState {
     let agent = this.#agents.get(threadId);
     if (!agent) {
-      agent = { threadId, status: "unknown" };
+      agent = { threadId, status: "unknown", messages: [], messageCount: 0 };
       this.#agents.set(threadId, agent);
     }
     return agent;
@@ -257,6 +300,28 @@ export class RuntimeState extends EventEmitter {
     return loop;
   }
 
+  #activateLoop(loop: LoopState, agent: AgentState, turnId: string): void {
+    if (agent.activeTurnId !== turnId) return;
+    if (loop.activeTurnId !== turnId) {
+      loop.iteration = Math.max(1, loop.iteration);
+      loop.activeTurnId = turnId;
+    }
+    loop.phase = "execute";
+  }
+
+  #addEvidence(loop: LoopState, threadId: string, summary: string, source: string, itemId?: string): void {
+    const id = itemId ?? `${threadId}:${loop.iteration}:${summary}`;
+    if (loop.evidence.some((item) => item.id === id)) return;
+    loop.evidence.push({
+      id,
+      iteration: loop.iteration,
+      summary,
+      source,
+      agentThreadId: threadId,
+      at: new Date().toISOString(),
+    });
+  }
+
   #owningLoop(threadId: string): LoopState | undefined {
     let current: string | undefined = threadId;
     while (current) {
@@ -267,6 +332,8 @@ export class RuntimeState extends EventEmitter {
     return undefined;
   }
 }
+
+const MAX_AGENT_MESSAGES = 100;
 
 function loopWarnings(loop: LoopState, agents: AgentState[]): string[] {
   const descendants = agents.filter((agent) => belongsTo(loop.threadId, agent, agents));

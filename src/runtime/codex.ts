@@ -6,7 +6,7 @@ import { CodexAppServerAdapter } from "../codex/adapters.js";
 import type { WatchdogEvent } from "../codex/normalizer.js";
 import { CodexAppServerClient } from "../codex/protocol.js";
 import { createRuntimeControlHandlers } from "./adapter.js";
-import { startControlServer } from "./control.js";
+import { startRunControlServer } from "./control.js";
 import { RuntimeState } from "./state.js";
 
 const CODEX_BIN = process.env.WATCHDOG_CODEX_BIN ?? "codex";
@@ -18,8 +18,8 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
   let codex: ChildProcess | undefined;
   let client: CodexAppServerClient | undefined;
   let adapter: CodexAppServerAdapter | undefined;
-  let control: Awaited<ReturnType<typeof startControlServer>> | undefined;
-  const eventLog = await createEventLog();
+  let control: Awaited<ReturnType<typeof startRunControlServer>> | undefined;
+  const logs = await createRunLogs();
   const state = new RuntimeState();
 
   const cleanup = async () => {
@@ -33,26 +33,28 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
 
   try {
     appServer = spawn(CODEX_BIN, ["app-server", "--listen", remoteAddress], { stdio: ["ignore", "pipe", "pipe"] });
-    appServer.on("error", (error) => console.error(`[watchdog] could not start Codex App Server: ${error.message}`));
+    appServer.on("error", (error) => logs.diagnostic("app-server", `could not start: ${error.message}`));
     appServer.stderr?.on("data", (chunk) => {
       const line = chunk.toString().trim();
-      if (line) console.error(`[watchdog:app-server] ${line}`);
+      if (line) logs.diagnostic("app-server", line);
     });
 
     await waitForReady(port);
     client = await connectWithRetry(remoteAddress);
-    client.on("connectionError", (error: Error) => console.error(`[watchdog] App Server connection error: ${error.message}`));
+    client.on("connectionError", (error: Error) => logs.diagnostic("connection", error.message));
     adapter = new CodexAppServerAdapter(client, state);
     const recordEvent = (event: WatchdogEvent) => {
       state.apply(event);
-      console.error(formatEvent(event));
-      void appendFile(eventLog, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
+      if (event.type === "agent.message.delta") return;
+      logs.event(event);
     };
     adapter.onEvent(recordEvent);
     await adapter.start();
-    control = await startControlServer(createRuntimeControlHandlers(adapter, state, recordEvent));
+    control = await startRunControlServer(createRuntimeControlHandlers(adapter, state, recordEvent), adapter.descriptor, { startedAt: state.startedAt });
     console.error("[watchdog] live control attached over a loopback-only WebSocket");
-    console.error(`[watchdog] event trace: ${eventLog}`);
+    console.error(`[watchdog] run id: ${control.runId}`);
+    console.error(`[watchdog] event trace: ${logs.eventPath}`);
+    console.error(`[watchdog] diagnostics: ${logs.diagnosticPath}`);
     console.error(`[watchdog] terminal controls ready: ${control.path}`);
 
     codex = spawn(CODEX_BIN, ["--remote", remoteAddress, ...codexArgs], { cwd: process.cwd(), stdio: "inherit" });
@@ -64,13 +66,34 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
     await control?.close();
     await adapter?.stop();
     await cleanup();
+    await logs.flush();
   }
 }
 
-async function createEventLog(): Promise<string> {
-  const directory = join(process.cwd(), ".watchdog", "runs");
+type RunLogs = {
+  eventPath: string;
+  diagnosticPath: string;
+  event(event: WatchdogEvent): void;
+  diagnostic(scope: string, message: string): void;
+  flush(): Promise<void>;
+};
+
+export async function createRunLogs(directory = join(process.cwd(), ".watchdog", "runs")): Promise<RunLogs> {
   await mkdir(directory, { recursive: true });
-  return join(directory, `${new Date().toISOString().replaceAll(":", "-")}.jsonl`);
+  const basename = new Date().toISOString().replaceAll(":", "-");
+  const eventPath = join(directory, `${basename}.jsonl`);
+  const diagnosticPath = join(directory, `${basename}.diagnostics.log`);
+  let pending = Promise.resolve();
+  const append = (path: string, line: string) => {
+    pending = pending.then(() => appendFile(path, line)).catch(() => undefined);
+  };
+  return {
+    eventPath,
+    diagnosticPath,
+    event: (event) => append(eventPath, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`),
+    diagnostic: (scope, message) => append(diagnosticPath, `${new Date().toISOString()} [${scope}] ${message}\n`),
+    flush: async () => { await pending; },
+  };
 }
 
 async function waitForReady(port: number, timeoutMs = 8_000): Promise<void> {
@@ -114,30 +137,4 @@ async function freePort(): Promise<number> {
       server.close((error) => error ? reject(error) : resolve(address.port));
     });
   });
-}
-
-function formatEvent(event: WatchdogEvent): string {
-  const id = "threadId" in event ? short(event.threadId) : short(event.agentThreadId);
-  switch (event.type) {
-    case "thread.started": return `[watchdog] thread ${id} started${event.parentThreadId ? ` (child of ${short(event.parentThreadId)})` : ""}${label(event.nickname, event.role)}`;
-    case "thread.status": return `[watchdog] ${id} is ${event.status}`;
-    case "turn.started": return `[watchdog] ${id} turn started`;
-    case "turn.completed": return `[watchdog] ${id} turn completed`;
-    case "loop.objective": return `[watchdog] ${id} loop objective captured`;
-    case "agent.spawned": return `[watchdog] ${short(event.parentThreadId)} spawned ${short(event.agentThreadId)}${event.agentPath ? ` as ${event.agentPath}` : ""}`;
-    case "agent.identity": return `[watchdog] ${id} identity${label(event.nickname, event.role) || " unavailable"}`;
-    case "agent.activity": return `[watchdog] ${id} ${event.tool} ${event.status}${event.model ? ` (${event.model}${event.reasoningEffort ? `/${event.reasoningEffort}` : ""})` : ""}`;
-    case "agent.requestedConfig": return `[watchdog] ${short(event.parentThreadId)} requested ${short(event.agentThreadId)} ${event.model ?? "default"}/${event.reasoningEffort ?? "default"}`;
-    case "agent.effectiveConfig": return `[watchdog] ${id} effective ${event.model ?? "unknown"}/${event.reasoningEffort ?? "default"}`;
-    case "tokens.updated": return `[watchdog] ${id} tokens ${event.totalTokens ?? "?"} total / ${event.outputTokens ?? "?"} output`;
-    case "loop.configured": return `[watchdog] ${id} loop configured`;
-    case "evidence.collected": return `[watchdog] ${id} evidence collected (${event.source})`;
-    case "loop.verified": return `[watchdog] ${id} verifier ${event.status}`;
-  }
-}
-
-function short(id: string): string { return id.slice(0, 8); }
-function label(nickname?: string, role?: string): string {
-  const values = [nickname, role].filter(Boolean);
-  return values.length ? ` [${values.join(" · ")}]` : "";
 }

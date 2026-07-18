@@ -25,9 +25,65 @@ describe("RuntimeState", () => {
   it("does not count a duplicated active-turn observation as another loop iteration", () => {
     const state = new RuntimeState();
     state.apply({ type: "thread.started", threadId: "root" });
+    state.apply({ type: "loop.configured", threadId: "root", verifier: "done" });
     state.apply({ type: "turn.started", threadId: "root", turnId: "turn-1" });
     state.apply({ type: "turn.started", threadId: "root", turnId: "turn-1" });
     expect(state.snapshot().loops[0]?.iteration).toBe(1);
+  });
+
+  it("keeps an ordinary task out of the loop model and captures child message history", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root" });
+    state.apply({ type: "turn.started", threadId: "root", turnId: "turn-1" });
+    state.apply({ type: "turn.input", threadId: "root", turnId: "turn-1", input: "Inspect one file with two subagents" });
+    state.apply({ type: "thread.started", threadId: "child", parentThreadId: "root", nickname: "Curie" });
+    state.apply({ type: "agent.message.delta", threadId: "child", itemId: "report-1", delta: "Inspection complete; " });
+    state.apply({ type: "agent.message.delta", threadId: "child", itemId: "report-1", delta: "sleeping before final report." });
+    expect(state.resolve("child").streamingMessage?.text).toBe("Inspection complete; sleeping before final report.");
+    state.apply({ type: "agent.message", threadId: "child", itemId: "report-1", message: "Inspection complete; sleeping before final report.", at: "2026-07-17T12:00:00.000Z" });
+    state.apply({ type: "agent.message", threadId: "child", itemId: "report-2", message: "Final finding: one stale registry path.", at: "2026-07-17T12:01:00.000Z" });
+    state.apply({ type: "agent.message", threadId: "child", itemId: "report-2", message: "Duplicate delivery must be ignored." });
+
+    const snapshot = state.snapshot();
+    const child = snapshot.agents.find((agent) => agent.threadId === "child");
+    expect(snapshot.loops).toEqual([]);
+    expect(snapshot.agents.find((agent) => agent.threadId === "root")?.task).toBe("Inspect one file with two subagents");
+    expect(child?.streamingMessage).toBeUndefined();
+    expect(child?.messages).toEqual([
+      { id: "report-1", text: "Inspection complete; sleeping before final report.", at: "2026-07-17T12:00:00.000Z" },
+      { id: "report-2", text: "Final finding: one stale registry path.", at: "2026-07-17T12:01:00.000Z" },
+    ]);
+    expect(child?.messageCount).toBe(2);
+    expect(child?.latestMessage).toBe("Final finding: one stale registry path.");
+  });
+
+  it("bounds in-memory message history while retaining the total count", () => {
+    const state = new RuntimeState();
+    for (let index = 1; index <= 105; index += 1) {
+      state.apply({ type: "agent.message", threadId: "child", itemId: `message-${index}`, message: `Report ${index}` });
+    }
+    const child = state.resolve("child");
+    expect(child.messageCount).toBe(105);
+    expect(child.messages).toHaveLength(100);
+    expect(child.messages?.[0]?.text).toBe("Report 6");
+    expect(child.messages?.at(-1)?.text).toBe("Report 105");
+  });
+
+  it("does not leave an abandoned streaming response marked live after a turn ends", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "turn.started", threadId: "child", turnId: "turn-1" });
+    state.apply({ type: "agent.message.delta", threadId: "child", itemId: "draft", delta: "Partial draft" });
+    state.apply({ type: "turn.completed", threadId: "child", turnId: "turn-1" });
+    expect(state.resolve("child").streamingMessage).toBeUndefined();
+  });
+
+  it("does not treat ordinary agent commentary as verified loop evidence", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root" });
+    state.apply({ type: "loop.configured", threadId: "root", verifier: "tests pass" });
+    state.apply({ type: "thread.started", threadId: "child", parentThreadId: "root" });
+    state.apply({ type: "agent.message", threadId: "child", itemId: "commentary", message: "I am starting the audit." });
+    expect(state.snapshot().loops[0]?.evidence).toEqual([]);
   });
 
   it("waits for a parent turn to become steerable", async () => {

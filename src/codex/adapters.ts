@@ -57,13 +57,29 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (!target.parentThreadId) return { stopped: agentLabel(target), parentNotified: false };
 
     const root = this.state.rootFor(target.threadId);
-    const parent = await this.state.waitForActiveTurn(root.threadId, 3_000);
-    if (!parent?.activeTurnId) return { stopped: agentLabel(target), parentNotified: false, notificationTarget: agentLabel(root) };
+    const directParent = this.state.resolve(target.parentThreadId);
+    const directParentIsRoot = directParent.threadId === root.threadId;
+    const activeRoot = await this.state.waitForActiveTurn(root.threadId, 3_000);
+    const notification = {
+      directParent: agentLabel(directParent),
+      notificationTarget: agentLabel(root),
+    };
+    if (!activeRoot?.activeTurnId) {
+      return { stopped: agentLabel(target), parentNotified: false, rootNotified: false, ...notification };
+    }
     try {
-      await steerActiveRoot(this.client, this.state, parent.threadId, `Watchdog operator intervention: subagent ${agentLabel(target)} was stopped. Do not continue waiting for it. Re-plan from the evidence you have: continue yourself, delegate a replacement if warranted, or report the limitation.`);
-      return { stopped: agentLabel(target), parentNotified: true, notificationTarget: agentLabel(parent) };
+      const nestedContext = directParentIsRoot
+        ? ""
+        : ` Its immediate parent is native subagent ${agentLabel(directParent)}, which Watchdog cannot steer directly; account for the possibility that it is still waiting.`;
+      await steerActiveRoot(this.client, this.state, activeRoot.threadId, `Watchdog operator intervention: subagent ${agentLabel(target)} was stopped.${nestedContext} Do not continue waiting for it. Re-plan from the evidence you have: continue yourself, delegate a replacement if warranted, or report the limitation.`);
+      return {
+        stopped: agentLabel(target),
+        parentNotified: directParentIsRoot,
+        rootNotified: true,
+        ...notification,
+      };
     } catch {
-      return { stopped: agentLabel(target), parentNotified: false, notificationTarget: agentLabel(parent) };
+      return { stopped: agentLabel(target), parentNotified: false, rootNotified: false, ...notification };
     }
   }
 

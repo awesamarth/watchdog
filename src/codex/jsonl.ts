@@ -102,11 +102,11 @@ export class CodexJsonlObserver extends EventEmitter {
         tail.activeTurnId = undefined;
         this.#emit({ type: "thread.status", threadId, status: payloadType === "turn_aborted" ? "interrupted" : "idle" });
       } else if (payloadType === "user_message" && tail.activeTurnId) {
-        const objective = text(payload.message)?.trim();
-        if (objective) this.#emit({ type: "loop.objective", threadId, turnId: tail.activeTurnId, objective: objective.slice(0, 1_000) });
+        const input = text(payload.message)?.trim();
+        if (input) this.#emit({ type: "turn.input", threadId, turnId: tail.activeTurnId, input: input.slice(0, 2_000) });
       } else if (payloadType === "agent_message") {
-        const summary = text(payload.message)?.trim();
-        if (summary) this.#emit({ type: "evidence.collected", threadId, summary: summary.slice(0, 500), source: "observed agent message" });
+        const message = text(payload.message)?.trim();
+        if (message) this.#emit({ type: "agent.message", threadId, message, at: text(record.timestamp) });
       } else if (payloadType === "token_count") {
         const usage = object(object(payload.info).total_token_usage);
         this.#emit({ type: "tokens.updated", threadId, totalTokens: numeric(usage.total_tokens), outputTokens: numeric(usage.output_tokens) });

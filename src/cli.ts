@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runCodexWithWatchdog } from "./runtime/codex.js";
 import { requestControl, type ControlRequest } from "./runtime/control.js";
+import { listRegisteredRuns, unregisterRun } from "./runtime/registry.js";
 import type { AgentState, RunSnapshot } from "./runtime/state.js";
 
 const [, , command, ...args] = process.argv;
@@ -15,58 +16,76 @@ if (command === "codex") {
   process.exitCode = await runCodexWithWatchdog(args);
 } else if (command === "tui") {
   const { runTui } = await import("./tui/run.js");
-  await runTui();
+  await runTui(takeRunId(args));
 } else if (command === "dashboard") {
   const { runDashboard } = await import("./server/dashboard.js");
   await runDashboard(args);
+} else if (command === "demo") {
+  const { runDeterministicDemo } = await import("./runtime/demo.js");
+  await runDeterministicDemo(args);
+} else if (command === "doctor") {
+  const { runDoctor } = await import("./runtime/doctor.js");
+  await runDoctor();
 } else if (command === "observe") {
   const { runJsonlObserver } = await import("./runtime/observe.js");
   await runJsonlObserver(args);
+} else if (command === "runs") {
+  await printRuns();
 } else if (command === "ps") {
-  printAgents(await snapshot());
+  printAgents(await snapshot(takeRunId(args)));
 } else if (command === "tree") {
-  printTree(await snapshot());
+  printTree(await snapshot(takeRunId(args)));
 } else if (command === "inspect") {
-  const agent = resolveFromSnapshot(await snapshot(), required(args[0], "Usage: watchdog inspect <agent>"));
+  const runId = takeRunId(args);
+  const agent = resolveFromSnapshot(await snapshot(runId), required(args[0], "Usage: watchdog inspect <agent> [--run <id>]"));
   console.log(JSON.stringify(agent, null, 2));
 } else if (command === "steer") {
+  const runId = takeRunId(args);
   const [agent, ...message] = args;
-  console.log(JSON.stringify(await requestControl({ action: "steer", agent: required(agent, "Usage: watchdog steer <agent> <message>"), message: required(message.join(" "), "Usage: watchdog steer <agent> <message>") }), null, 2));
+  console.log(JSON.stringify(await requestControl({ action: "steer", agent: required(agent, "Usage: watchdog steer <agent> <message> [--run <id>]"), message: required(message.join(" "), "Usage: watchdog steer <agent> <message> [--run <id>]") }, { runId }), null, 2));
 } else if (command === "stop") {
-  console.log(JSON.stringify(await requestControl({ action: "interrupt", agent: required(args[0], "Usage: watchdog stop <agent>") }), null, 2));
+  const runId = takeRunId(args);
+  console.log(JSON.stringify(await requestControl({ action: "interrupt", agent: required(args[0], "Usage: watchdog stop <agent> [--run <id>]") }, { runId }), null, 2));
 } else if (command === "retry") {
+  const runId = takeRunId(args);
   const retry = parseRetry(args);
-  console.log(JSON.stringify(await requestControl({ action: "retry", ...retry }), null, 2));
+  console.log(JSON.stringify(await requestControl({ action: "retry", ...retry }, { runId }), null, 2));
 } else if (command === "loop") {
-  await loopCommand(args);
+  await loopCommand(args, takeRunId(args));
 } else {
   console.log(`Watchdog — local operator control plane for agentic loops and subagents
 
 Usage:
   watchdog codex [any normal Codex arguments]
-  watchdog tui
+  watchdog tui [--run <id>]
   watchdog dashboard [--port <port>]
+  watchdog demo [--port <port>]
+  watchdog doctor
+  watchdog runs
   watchdog observe [--once] [--session <id>] [--sessions-root <path>]
-  watchdog ps | tree | inspect <agent>
-  watchdog steer <root|agent> <message>
-  watchdog stop <root|agent>
-  watchdog retry <root-agent> [--model <model>] [--effort <effort>] <message>
-  watchdog loop set <agent> [--goal <text>] [--verifier <text>] [--token-budget <n>] [--max-iterations <n>]
-  watchdog loop evidence <agent> <summary>
-  watchdog loop verify <agent> <pass|fail> [summary]
+  watchdog ps | tree | inspect <agent> [--run <id>]
+  watchdog steer <root|agent> <message> [--run <id>]
+  watchdog stop <root|agent> [--run <id>]
+  watchdog retry <root-agent> [--model <model>] [--effort <effort>] <message> [--run <id>]
+  watchdog loop set <agent> [options] [--run <id>]
+  watchdog loop evidence <agent> <summary> [--run <id>]
+  watchdog loop verify <agent> <pass|fail> [summary] [--run <id>]
 
 Examples:
   watchdog codex
+  watchdog demo
+  watchdog doctor
   watchdog codex "Use two subagents to inspect this repository."
   watchdog codex --model gpt-5.6-terra
 
 Run watchdog codex in one terminal, then use watchdog tui or the
-operator commands above from another terminal in the same project.`);
+operator commands above from another terminal in the same project.
+watchdog demo is a clearly labeled local simulation for rehearsals.`);
   process.exitCode = command ? 1 : 0;
 }
 }
 
-async function snapshot(): Promise<RunSnapshot> { return await requestControl({ action: "snapshot" }) as RunSnapshot; }
+async function snapshot(runId?: string): Promise<RunSnapshot> { return await requestControl({ action: "snapshot" }, { runId }) as RunSnapshot; }
 function required(value: string | undefined, message: string): string { if (!value) throw new Error(message); return value; }
 function resolveFromSnapshot(snapshot: RunSnapshot, target: string): AgentState {
   const needle = target.toLowerCase();
@@ -88,6 +107,34 @@ function printTree(snapshot: RunSnapshot): void {
   };
   print(undefined, 0);
 }
+async function printRuns(): Promise<void> {
+  const records = await listRegisteredRuns();
+  const active = [];
+  for (const record of records) {
+    try {
+      const snapshot = await requestControl({ action: "snapshot" }, { socketPath: record.socketPath }) as RunSnapshot;
+      active.push({ record, snapshot });
+    } catch {
+      await unregisterRun(record.runId);
+    }
+  }
+  if (active.length === 0) {
+    console.log("No active Watchdog runs.");
+    return;
+  }
+  for (const { record, snapshot } of active) {
+    const adapter = snapshot.adapter ?? record.adapter;
+    const activeAgents = snapshot.agents.filter((agent) => agent.activeTurnId).length;
+    console.log(`${record.runId}  ${adapter.harness.padEnd(13)} ${record.projectName.padEnd(18)} ${activeAgents}/${snapshot.agents.length} agents  ${record.cwd}`);
+  }
+}
+function takeRunId(values: string[]): string | undefined {
+  const index = values.indexOf("--run");
+  if (index < 0) return undefined;
+  const value = required(values[index + 1], "--run needs an id");
+  values.splice(index, 2);
+  return value;
+}
 function parseRetry(values: string[]): { agent: string; message: string; model?: string; effort?: string } {
   const agent = required(values.shift(), "Usage: watchdog retry <agent> [--model <model>] [--effort <effort>] <message>");
   let model: string | undefined;
@@ -102,18 +149,18 @@ function parseRetry(values: string[]): { agent: string; message: string; model?:
   return { agent, model, effort, message: required(values.join(" "), "A retry message is required") };
 }
 
-async function loopCommand(values: string[]): Promise<void> {
+async function loopCommand(values: string[], runId?: string): Promise<void> {
   const subcommand = required(values.shift(), "Usage: watchdog loop <set|evidence|verify> ...");
   const agent = required(values.shift(), `Usage: watchdog loop ${subcommand} <agent> ...`);
   if (subcommand === "evidence") {
     const summary = required(values.join(" "), "Usage: watchdog loop evidence <agent> <summary>");
-    console.log(JSON.stringify(await requestControl({ action: "loop.evidence", agent, summary }), null, 2));
+    console.log(JSON.stringify(await requestControl({ action: "loop.evidence", agent, summary }, { runId }), null, 2));
     return;
   }
   if (subcommand === "verify") {
     const raw = required(values.shift(), "Usage: watchdog loop verify <agent> <pass|fail> [summary]");
     if (raw !== "pass" && raw !== "fail") throw new Error("Verification status must be pass or fail");
-    console.log(JSON.stringify(await requestControl({ action: "loop.verify", agent, status: raw === "pass" ? "passed" : "failed", summary: values.join(" ") || undefined }), null, 2));
+    console.log(JSON.stringify(await requestControl({ action: "loop.verify", agent, status: raw === "pass" ? "passed" : "failed", summary: values.join(" ") || undefined }, { runId }), null, 2));
     return;
   }
   if (subcommand !== "set") throw new Error(`Unknown loop command '${subcommand}'`);
@@ -127,7 +174,7 @@ async function loopCommand(values: string[]): Promise<void> {
     else if (flag === "--max-iterations") request.maxIterations = positiveInteger(value, flag);
     else throw new Error(`Unknown loop option ${flag}`);
   }
-  console.log(JSON.stringify(await requestControl(request), null, 2));
+  console.log(JSON.stringify(await requestControl(request, { runId }), null, 2));
 }
 
 function positiveInteger(value: string, flag: string): number {

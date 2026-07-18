@@ -35,9 +35,9 @@ describe("CodexJsonlObserver", () => {
 
     const snapshot = state.snapshot();
     expect(snapshot.agents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ threadId: "root", totalTokens: 123, effective: { model: "gpt-test", effort: "medium" } }),
-      expect.objectContaining({ threadId: "child", parentThreadId: "root", nickname: "Gauss", role: "verifier", requested: expect.objectContaining({ prompt: "Prove the fix" }) }),
+      expect.objectContaining({ threadId: "root", task: "Find and verify the race", totalTokens: 123, effective: { model: "gpt-test", effort: "medium" } }),
+      expect.objectContaining({ threadId: "child", parentThreadId: "root", nickname: "Gauss", role: "verifier", latestMessage: "The regression test passes", messageCount: 1, messages: [expect.objectContaining({ text: "The regression test passes" })], requested: expect.objectContaining({ prompt: "Prove the fix" }) }),
     ]));
-    expect(snapshot.loops[0]).toMatchObject({ objective: "Find and verify the race", evidence: [expect.objectContaining({ agentThreadId: "child", summary: "The regression test passes" })] });
+    expect(snapshot.loops).toEqual([]);
   });
 });

@@ -7,13 +7,20 @@
   "bin": {
     "watchdog": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "web/dist",
+    "README.md",
+    "docs/demo-rehearsal.md"
+  ],
   "scripts": {
     "dev": "tsx src/cli.ts",
     "dashboard": "bun run web:build && tsx src/cli.ts dashboard",
+    "demo": "bun run web:build && tsx src/cli.ts demo",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "build": "bun run web:build && tsup src/cli.ts --format esm --dts --clean --out-dir dist",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run src web/src",
     "test:web": "playwright test"
   },
