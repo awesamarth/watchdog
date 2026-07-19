@@ -1,26 +1,67 @@
-export type AgentConfig = { model?: string; effort?: string };
-export type AgentMessage = { id: string; text: string; at: string };
-export type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
-export type Capability = { available: boolean; reason?: string };
+type AgentConfig = { model?: string; effort?: string };
+type AgentMessage = { id: string; text: string; at: string };
+type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
+type Capability = { available: boolean; reason?: string };
 export type AgentCapabilities = {
   observe: Capability;
   steer: Capability;
+  followUp: Capability;
   interrupt: Capability;
   retry: Capability;
   modelOverride: Capability;
 };
 export type AdapterDescriptor = { harness: string; transport: string; mode: "live" | "observed"; label: string };
+type ExecutionAuthority = "authoritative" | "declared" | "legacy" | "suspected";
+type ExecutionNodeKind = "stage" | "action" | "verifier" | "wait" | "subgraph" | "terminal";
+type ExecutionEdgeKind = "normal" | "success" | "failure" | "loop-back";
+type ExecutionNode = { id: string; label: string; kind: ExecutionNodeKind; description?: string; subgraphId?: string };
+type ExecutionEdge = { id: string; from: string; to: string; kind: ExecutionEdgeKind; condition?: string };
+type NodeActivation = {
+  id: string;
+  nodeId: string;
+  iteration: number;
+  status: "queued" | "running" | "waiting" | "passed" | "failed" | "stopped";
+  threadIds: string[];
+  startedAt: string;
+  completedAt?: string;
+  summary?: string;
+};
+export type ExecutionGraphState = {
+  id: string;
+  ownerThreadId: string;
+  label?: string;
+  objective?: string;
+  source: { kind: "harness" | "watchdog" | "operator" | "legacy" | "inferred"; label?: string };
+  authority: ExecutionAuthority;
+  parentExecutionId?: string;
+  parentNodeId?: string;
+  nodes: ExecutionNode[];
+  edges: ExecutionEdge[];
+  entryNodeIds: string[];
+  terminalNodeIds: string[];
+  status: "pending" | "running" | "waiting" | "blocked" | "completed" | "failed" | "stopped";
+  iteration: number;
+  activations: NodeActivation[];
+  traversals: Array<{ id: string; edgeId: string; from: string; to: string; iteration: number; at: string }>;
+  activeNodeIds: string[];
+  startedAt?: string;
+  completedAt?: string;
+  stopReason?: string;
+  warnings: string[];
+};
 
 export type AgentState = {
   threadId: string;
   parentThreadId?: string;
   nickname?: string;
   role?: string;
+  kind?: "root" | "native-child" | "subprocess-worker" | "independent-session";
   agentPath?: string;
   status: string;
   activeTurnId?: string;
   totalTokens?: number;
   outputTokens?: number;
+  costUsd?: number;
   requested?: AgentConfig & { prompt?: string };
   effective?: AgentConfig;
   latestActivity?: { tool: string; status: string };
@@ -29,6 +70,7 @@ export type AgentState = {
   messages?: AgentMessage[];
   messageCount?: number;
   streamingMessage?: StreamingAgentMessage;
+  execution?: { executionId: string; nodeId: string; activationId: string };
   startedAt?: string;
   lastActivityAt?: string;
 };
@@ -51,10 +93,11 @@ export type RunSnapshot = {
   mode: "live" | "observed";
   agents: AgentState[];
   loops: LoopState[];
+  executions: ExecutionGraphState[];
   adapter?: AdapterDescriptor;
   capabilities?: Record<string, AgentCapabilities>;
 };
-export type RunListItem = {
+type RunListItem = {
   runId: string;
   projectName: string;
   cwd: string;

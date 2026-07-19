@@ -2,16 +2,12 @@ import { describe, expect, it } from "vitest";
 import { dogPetFrame, yardViewport } from "./YardCanvas";
 
 describe("yardViewport", () => {
-  it("preserves the 1100×680 world ratio in narrow canvases", () => {
-    expect(yardViewport(550, 680)).toEqual({ scale: .5, x: 0, y: 170 });
-  });
-
-  it("preserves the world ratio in short canvases", () => {
-    expect(yardViewport(1100, 340)).toEqual({ scale: .5, x: 275, y: 0 });
-  });
-
-  it("fills a matching aspect ratio without letterboxing", () => {
-    expect(yardViewport(550, 340)).toEqual({ scale: .5, x: 0, y: 0 });
+  it.each([
+    ["narrow", 550, 680, { scale: .5, x: 0, y: 170 }],
+    ["short", 1100, 340, { scale: .5, x: 275, y: 0 }],
+    ["matching ratio", 550, 340, { scale: .5, x: 0, y: 0 }],
+  ] as const)("preserves the world ratio in a %s canvas", (_label, width, height, expected) => {
+    expect(yardViewport(width, height)).toEqual(expected);
   });
 });
 

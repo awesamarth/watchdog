@@ -6,6 +6,7 @@ import { CodexEventNormalizer } from "./normalizer.js";
 import type { CodexAppServerClient } from "./protocol.js";
 
 const CHILD_STEER_REASON = "Codex does not allow direct steering input for native subagents. Stop is supported; steering must currently go through the parent agent.";
+const FOLLOW_UP_REASON = "Codex App Server does not expose a distinct follow-up queue through Watchdog. Use root steering while active or retry/start a root turn.";
 const CHILD_RETRY_REASON = "Codex does not allow direct new-turn input for native subagents. Retry is available only for top-level Watchdog-owned threads right now.";
 const OBSERVED_REASON = "This is an external Codex session observed from JSONL. Agent steering and stopping are unavailable; relaunch with `watchdog codex` for live controls.";
 
@@ -33,6 +34,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (target.parentThreadId) return {
       observe: available(),
       steer: unavailable(CHILD_STEER_REASON),
+      followUp: unavailable(FOLLOW_UP_REASON),
       interrupt: active ? available() : unavailable("This subagent has no active turn to interrupt."),
       retry: unavailable(CHILD_RETRY_REASON),
       modelOverride: unavailable("A native Codex subagent cannot be restarted directly with a model override."),
@@ -40,6 +42,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     return {
       observe: available(),
       steer: active ? available() : unavailable("This root agent has no active turn to steer."),
+      followUp: unavailable(FOLLOW_UP_REASON),
       interrupt: active ? available() : unavailable("This root agent has no active turn to interrupt."),
       retry: available(),
       modelOverride: available(),
@@ -50,6 +53,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (target.parentThreadId) throw new Error(CHILD_STEER_REASON);
     return await steerActiveRoot(this.client, this.state, target.threadId, message);
   }
+  async followUp(): Promise<unknown> { throw new Error(FOLLOW_UP_REASON); }
 
   async interrupt(target: AdapterTarget): Promise<unknown> {
     if (!target.activeTurnId) throw new Error(`${agentLabel(target)} has no active turn to interrupt`);
@@ -122,12 +126,14 @@ export class CodexJsonlAdapter implements HarnessAdapter {
     return {
       observe: available(),
       steer: unavailable(OBSERVED_REASON),
+      followUp: unavailable(OBSERVED_REASON),
       interrupt: unavailable(OBSERVED_REASON),
       retry: unavailable(OBSERVED_REASON),
       modelOverride: unavailable(OBSERVED_REASON),
     };
   }
   async steer(): Promise<unknown> { throw new Error(OBSERVED_REASON); }
+  async followUp(): Promise<unknown> { throw new Error(OBSERVED_REASON); }
   async interrupt(): Promise<unknown> { throw new Error(OBSERVED_REASON); }
   async retry(): Promise<unknown> { throw new Error(OBSERVED_REASON); }
 }

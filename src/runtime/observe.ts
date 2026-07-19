@@ -2,7 +2,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CodexJsonlAdapter } from "../codex/adapters.js";
-import type { WatchdogEvent } from "../codex/normalizer.js";
+import type { WatchdogEvent } from "../adapters/events.js";
 import { adapterSnapshot, createRuntimeControlHandlers } from "./adapter.js";
 import { startRunControlServer } from "./control.js";
 import { RuntimeState } from "./state.js";

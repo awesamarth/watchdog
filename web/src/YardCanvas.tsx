@@ -1,9 +1,9 @@
 import { useEffect, useRef, type MouseEvent } from "react";
 import { harnessDisplayName } from "./harness";
-import type { AgentState, RunSnapshot } from "./types";
-import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, rootTrainTargetX, workflowStations } from "./yardMotion";
+import type { AgentState, ExecutionGraphState, RunSnapshot } from "./types";
+import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, executionStations, executionTrainTargetX } from "./yardMotion";
 
-type Hit = { x: number; y: number; w: number; h: number; type: "dog" | "agent" | "tower"; id?: string };
+type Hit = { x: number; y: number; w: number; h: number; type: "dog" | "agent" | "tower" | "execution"; id?: string };
 type Light = "day" | "night";
 
 const W = 1100;
@@ -18,8 +18,15 @@ export function yardViewport(width: number, height: number): { scale: number; x:
   };
 }
 
-export function YardCanvas({ snapshot, selectedId, onSelect, light, petNonce, onPet }: {
-  snapshot: RunSnapshot; selectedId?: string; onSelect: (id: string) => void; light: Light; petNonce: number; onPet: () => void;
+export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpenExecution, light, petNonce, onPet }: {
+  snapshot: RunSnapshot;
+  selectedId?: string;
+  executionId?: string;
+  onSelect: (id: string) => void;
+  onOpenExecution?: (id: string) => void;
+  light: Light;
+  petNonce: number;
+  onPet: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hitsRef = useRef<Hit[]>([]);
@@ -65,11 +72,12 @@ export function YardCanvas({ snapshot, selectedId, onSelect, light, petNonce, on
       const delta = Math.min(.08, Math.max(0, (now - frameAtRef.current) / 1000));
       frameAtRef.current = now;
       const petElapsed = petAtRef.current ? Math.max(0, (now - petAtRef.current) / 1000) : 99;
-      hitsRef.current = drawYard(context, snapshot, selectedId, light, (now - startRef.current) / 1000, petElapsed, dog, trains, backdrop, tower, tracks, clouds, smoke, motionRef.current, delta);
+      const execution = executionId ? snapshot.executions.find((candidate) => candidate.id === executionId) : undefined;
+      hitsRef.current = drawYard(context, snapshot, selectedId, execution, light, (now - startRef.current) / 1000, petElapsed, dog, trains, backdrop, tower, tracks, clouds, smoke, motionRef.current, delta);
     };
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [snapshot, selectedId, light]);
+  }, [snapshot, selectedId, executionId, light]);
 
   const locateHit = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -85,12 +93,18 @@ export function YardCanvas({ snapshot, selectedId, onSelect, light, petNonce, on
   }} onMouseLeave={(event) => { event.currentTarget.style.cursor = "default"; }} onClick={(event) => {
     const hit = locateHit(event);
     if (hit?.type === "dog") onPet();
-    else if (hit?.type === "tower") { const root = snapshot.agents.find((agent) => !agent.parentThreadId); if (root) onSelect(root.threadId); }
+    else if (hit?.type === "execution" && hit.id) onOpenExecution?.(hit.id);
+    else if (hit?.type === "tower") {
+      const execution = executionId ? snapshot.executions.find((candidate) => candidate.id === executionId) : undefined;
+      const owner = snapshot.agents.find((agent) => agent.threadId === execution?.ownerThreadId)
+        ?? snapshot.agents.find((agent) => !agent.parentThreadId);
+      if (owner) onSelect(owner.threadId);
+    }
     else if (hit?.id) onSelect(hit.id);
   }} />;
 }
 
-function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selectedId: string | undefined, light: Light, t: number, petT: number, dog: HTMLImageElement, trains: HTMLImageElement, backdrop: HTMLImageElement, tower: HTMLImageElement, tracks: HTMLImageElement, clouds: HTMLImageElement, smoke: HTMLImageElement, motion: Map<string, { x: number; y: number }>, delta: number): Hit[] {
+function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selectedId: string | undefined, execution: ExecutionGraphState | undefined, light: Light, t: number, petT: number, dog: HTMLImageElement, trains: HTMLImageElement, backdrop: HTMLImageElement, tower: HTMLImageElement, tracks: HTMLImageElement, clouds: HTMLImageElement, smoke: HTMLImageElement, motion: Map<string, { x: number; y: number }>, delta: number): Hit[] {
   const night = light === "night";
   ctx.fillStyle = night ? "#142b27" : "#547c48";
   ctx.fillRect(0, 0, W, H);
@@ -98,25 +112,26 @@ function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selected
   drawTerrain(ctx, night);
   drawClouds(ctx, clouds, night, t);
   if (night) { ctx.fillStyle="rgba(6,16,32,.28)"; ctx.fillRect(0,0,W,H); }
-  const children = snapshot.agents.filter((agent) => agent.parentThreadId);
+  const primaryRoot = snapshot.agents.find((agent) => agent.threadId === execution?.ownerThreadId)
+    ?? snapshot.agents.find((agent) => !agent.parentThreadId);
+  const children = primaryRoot
+    ? snapshot.agents.filter((agent) => agent.parentThreadId === primaryRoot.threadId)
+    : snapshot.agents.filter((agent) => agent.parentThreadId);
   const placements = layoutChildren(children);
   const carriageScale = childTrainScale(children.length);
   drawTracks(ctx, tracks, placements, night);
-  const primaryLoop = snapshot.loops[0];
-  const primaryRoot = snapshot.agents.find((agent) => !agent.parentThreadId);
-  drawStations(ctx, primaryLoop, primaryRoot, night);
 
   const hits: Hit[] = [];
-  drawTower(ctx, tower, night, selectedId === snapshot.agents.find((agent) => !agent.parentThreadId)?.threadId);
+  hits.push(...drawStations(ctx, execution, primaryRoot, night));
+  drawTower(ctx, tower, night, selectedId === primaryRoot?.threadId);
   const dogY = 137;
   drawDog(ctx, dog, 104, dogY, t, snapshot, petT);
   drawHarnessSign(ctx, snapshot.adapter, night);
   hits.push({ x: 18, y: 34, w: 280, h: 305, type: "tower" }, { x: 98, y: 128, w: 104, h: 108, type: "dog" });
 
-  const roots = snapshot.agents.filter((agent) => !agent.parentThreadId);
+  const roots = primaryRoot ? [primaryRoot] : [];
   roots.forEach((agent, index) => {
-    const loop = snapshot.loops.find((candidate) => candidate.threadId === agent.threadId);
-    const targetX = rootTrainTargetX(loop, Boolean(agent.activeTurnId), agent.status) + index * 28;
+    const targetX = executionTrainTargetX(execution, Boolean(agent.activeTurnId), agent.status) + index * 28;
     const { x, y } = easedPosition(motion, agent.threadId, targetX, MAIN_LINE_Y, delta);
     drawTrain(ctx, trains, smoke, agent, x, y, 0, selectedId === agent.threadId, t, 1, true);
     hits.push(trainHit(agent.threadId, x, y, 1));
@@ -124,7 +139,14 @@ function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selected
 
   placements.forEach(({ agent, x: baseX, y: baseY, variant }, index) => {
     const targetX = childTrainTargetX(baseX, Boolean(agent.activeTurnId), agent.latestActivity?.status);
-    const targetY = childTrainTargetY(baseY, Boolean(agent.activeTurnId), agent.status, agent.latestActivity?.status, MAIN_LINE_Y);
+    const targetY = childTrainTargetY(
+      baseY,
+      Boolean(agent.activeTurnId),
+      agent.status,
+      agent.latestActivity?.status,
+      MAIN_LINE_Y,
+      carriageScale,
+    );
     const position = easedPosition(motion, agent.threadId, targetX, targetY, delta);
     drawTrain(ctx, trains, smoke, agent, position.x, position.y, variant, selectedId === agent.threadId, t + index * .17, carriageScale);
     hits.push(trainHit(agent.threadId, position.x, position.y, carriageScale));
@@ -231,18 +253,37 @@ function drawTrackSprite(ctx: CanvasRenderingContext2D, image: HTMLImageElement,
   drawAtlasSprite(ctx, image, 4, 3, col, row, TRACK_BOUNDS[row]![col]!, x, y, maxW, maxH);
 }
 
-function drawStations(ctx: CanvasRenderingContext2D, loop: RunSnapshot["loops"][number] | undefined, root: AgentState | undefined, night: boolean) {
-  const stations = workflowStations(loop);
-  const activeIndex = loop
-    ? loop.phase === "plan" ? 0 : loop.phase === "execute" ? 1 : loop.phase === "done" ? 3 : 2
+function drawStations(ctx: CanvasRenderingContext2D, execution: ExecutionGraphState | undefined, root: AgentState | undefined, night: boolean): Hit[] {
+  const stations = executionStations(execution);
+  const activeIndex = execution
+    ? Math.max(-1, stations.findIndex((station) => execution.activeNodeIds.includes(station.id)))
     : !root ? -1 : root.activeTurnId ? 0 : root.status === "unknown" ? 0 : 1;
+  const hits: Hit[] = [];
   stations.forEach((station, i) => {
-    const active = activeIndex === i;
-    ctx.fillStyle = night ? "#17231f" : "#e4d9bd"; ctx.fillRect(station.x-38, 350, 76, 35);
-    ctx.fillStyle = active ? "#f6c453" : (night ? "#8ea69b" : "#4d5b4a"); ctx.fillRect(station.x-32, 357, 64, 5);
-    ctx.fillStyle = night ? "#d9e5dc" : "#273229"; ctx.font = "700 11px ui-monospace"; ctx.textAlign="center"; ctx.fillText(station.label, station.x, 378);
-    ctx.fillStyle = active ? "#ffcc55" : "#294238"; ctx.fillRect(station.x-4, 329, 8, 16);
+    const active = activeIndex === i || station.status === "running" || station.status === "waiting";
+    const failed = station.status === "failed" || station.status === "stopped";
+    const width = Math.max(62, Math.min(90, 680 / Math.max(2, stations.length)));
+    ctx.fillStyle = night ? "#17231f" : "#e4d9bd"; ctx.fillRect(station.x-width/2, 313, width, 35);
+    ctx.fillStyle = failed ? "#c65c51" : active ? "#f6c453" : station.status === "passed" ? "#62b97d" : (night ? "#8ea69b" : "#4d5b4a");
+    ctx.fillRect(station.x-width/2+6, 320, width-12, 5);
+    ctx.fillStyle = night ? "#d9e5dc" : "#273229";
+    ctx.font = `700 ${stations.length > 7 ? 8 : 10}px ui-monospace`;
+    ctx.textAlign="center";
+    ctx.fillText(truncateStation(station.label, stations.length > 7 ? 10 : 13), station.x, 341);
+    ctx.fillStyle = failed ? "#c65c51" : active ? "#ffcc55" : "#294238"; ctx.fillRect(station.x-4, 292, 8, 16);
+    if (station.subgraphId) {
+      ctx.strokeStyle = active ? "#ffcc55" : night ? "#d9e5dc" : "#294238";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(station.x + width / 2 - 14, 329, 7, 7);
+      hits.push({ x: station.x - width / 2, y: 292, w: width, h: 56, type: "execution", id: station.subgraphId });
+    }
   });
+  return hits;
+}
+
+function truncateStation(label: string, limit: number): string {
+  const normalized = label.trim().toUpperCase();
+  return normalized.length > limit ? `${normalized.slice(0, Math.max(1, limit - 1))}…` : normalized;
 }
 
 function drawTower(ctx: CanvasRenderingContext2D, image: HTMLImageElement, night: boolean, selected: boolean) {
@@ -266,7 +307,11 @@ function drawTower(ctx: CanvasRenderingContext2D, image: HTMLImageElement, night
 }
 
 function drawDog(ctx: CanvasRenderingContext2D, image: HTMLImageElement, x: number, y: number, t: number, snapshot: RunSnapshot, petT: number) {
-  const severe = snapshot.loops.some((loop) => loop.warnings.some((warning) => /runaway|stalled|failed|budget|blocked/i.test(warning)));
+  const severe = snapshot.loops.some((loop) => loop.warnings.some((warning) => /runaway|stalled|failed|budget|blocked/i.test(warning)))
+    || snapshot.executions.some((execution) =>
+      ["blocked", "failed"].includes(execution.status)
+      || execution.warnings.some((warning) => /runaway|stalled|failed|budget|blocked/i.test(warning)),
+    );
   const petElapsed = Math.max(0, petT);
   const petting = petElapsed < .9;
   const row = petting ? 2 : severe ? 3 : snapshot.agents.some((agent) => agent.activeTurnId) ? 1 : 0;
@@ -317,7 +362,15 @@ function drawTrain(ctx: CanvasRenderingContext2D, image: HTMLImageElement, smoke
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(scale, scale);
-  if (selected) { ctx.fillStyle="#f3c64f"; ctx.fillRect(-52,-49,126,4); ctx.fillRect(-56,-45,4,78); ctx.fillRect(74,-45,4,78); }
+  if (selected) {
+    // The right-facing root sprite is mirrored around x=0, moving its visual
+    // center from +12 to -12. Keep the selection brackets centered on it.
+    const selectionX = flip ? -24 : 0;
+    ctx.fillStyle="#f3c64f";
+    ctx.fillRect(-52 + selectionX,-49,126,4);
+    ctx.fillRect(-56 + selectionX,-45,4,78);
+    ctx.fillRect(74 + selectionX,-45,4,78);
+  }
   // Anchors are measured from each cropped livery's actual chimney, rather
   // than the visual center of the train body.
   const chimney = [{ x: -1, y: -30 }, { x: -9, y: -35 }, { x: 16, y: -40 }, { x: 9, y: -41 }][variant % 4]!;
@@ -333,7 +386,8 @@ function drawTrain(ctx: CanvasRenderingContext2D, image: HTMLImageElement, smoke
     ctx.fillStyle=variant===0?"#d95b43":["#5f9ec5","#d3a34a","#7d6eb2"][variant-1]??"#5f9ec5"; ctx.fillRect(-27,-22,62,30); ctx.fillRect(-15,-38,28,18); ctx.fillStyle="#1f2925"; ctx.fillRect(-20,8,14,14);ctx.fillRect(22,8,14,14);
   }
   ctx.restore();
-  ctx.fillStyle="#111915"; ctx.fillRect(-48,38,120,25); ctx.fillStyle="#f3eedf"; ctx.font="700 12px ui-monospace"; ctx.textAlign="center"; ctx.fillText(agent.nickname??(agent.parentThreadId?agent.threadId.slice(0,8):"ROOT"),12,55);
+  const nameplateX = flip ? -24 : 0;
+  ctx.fillStyle="#111915"; ctx.fillRect(-48 + nameplateX,38,120,25); ctx.fillStyle="#f3eedf"; ctx.font="700 12px ui-monospace"; ctx.textAlign="center"; ctx.fillText(agent.nickname??(agent.parentThreadId?agent.threadId.slice(0,8):"ROOT"),12 + nameplateX,55);
   ctx.restore();
 }
 

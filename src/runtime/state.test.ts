@@ -121,4 +121,107 @@ describe("RuntimeState", () => {
     expect(state.rootFor("grandchild").threadId).toBe("root");
     expect(state.snapshot().loops.find((loop) => loop.threadId === "child")).toMatchObject({ iteration: 1, evidence: [expect.objectContaining({ agentThreadId: "grandchild" })] });
   });
+
+  it("tracks explicit graph activations, transitions, cycles, and child ownership without inventing phases", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root", kind: "root" });
+    state.apply({
+      type: "execution.declared",
+      graph: {
+        id: "repair-loop",
+        ownerThreadId: "root",
+        label: "Repair loop",
+        objective: "Repair until regression passes",
+        source: { kind: "watchdog", label: "test instrument" },
+        authority: "declared",
+        nodes: [
+          { id: "reproduce", label: "REPRODUCE", kind: "stage" },
+          { id: "patch", label: "PATCH", kind: "stage" },
+          { id: "regression", label: "REGRESSION", kind: "verifier" },
+          { id: "ready", label: "READY", kind: "terminal" },
+        ],
+        edges: [
+          { id: "reproduce-patch", from: "reproduce", to: "patch", kind: "normal" },
+          { id: "patch-regression", from: "patch", to: "regression", kind: "normal" },
+          { id: "retry", from: "regression", to: "patch", kind: "loop-back" },
+          { id: "pass", from: "regression", to: "ready", kind: "success" },
+        ],
+        entryNodeIds: ["reproduce"],
+        terminalNodeIds: ["ready"],
+      },
+    });
+    state.apply({ type: "execution.iteration.started", executionId: "repair-loop", iteration: 1 });
+    state.apply({ type: "execution.node.started", executionId: "repair-loop", nodeId: "patch", activationId: "patch-1", threadId: "root", iteration: 1 });
+    state.apply({ type: "agent.spawned", parentThreadId: "root", agentThreadId: "worker", state: "started" });
+    state.apply({ type: "execution.node.completed", executionId: "repair-loop", nodeId: "patch", activationId: "patch-1", status: "passed" });
+    state.apply({ type: "execution.edge.selected", executionId: "repair-loop", edgeId: "patch-regression", traversalId: "edge-1", iteration: 1 });
+    state.apply({ type: "execution.node.started", executionId: "repair-loop", nodeId: "regression", activationId: "verify-1", threadId: "root", iteration: 1 });
+    state.apply({ type: "execution.node.completed", executionId: "repair-loop", nodeId: "regression", activationId: "verify-1", status: "failed", summary: "one test failed" });
+    state.apply({ type: "execution.edge.selected", executionId: "repair-loop", edgeId: "retry", traversalId: "retry-1", iteration: 1 });
+    state.apply({ type: "execution.iteration.started", executionId: "repair-loop", iteration: 2 });
+    state.apply({
+      type: "execution.updated",
+      executionId: "repair-loop",
+      nodes: [{ id: "report", label: "REPORT", kind: "terminal" }],
+      edges: [{ id: "ready-report", from: "ready", to: "report", kind: "normal" }],
+      terminalNodeIds: ["report"],
+    });
+
+    const snapshot = state.snapshot();
+    expect(snapshot.loops).toEqual([]);
+    expect(snapshot.executions[0]).toMatchObject({
+      id: "repair-loop",
+      iteration: 2,
+      status: "running",
+      activeNodeIds: [],
+      traversals: [
+        expect.objectContaining({ edgeId: "patch-regression" }),
+        expect.objectContaining({ edgeId: "retry" }),
+      ],
+      terminalNodeIds: ["report"],
+    });
+    expect(snapshot.executions[0]?.nodes.at(-1)?.label).toBe("REPORT");
+    expect(snapshot.agents.find((agent) => agent.threadId === "worker")?.execution).toEqual({
+      executionId: "repair-loop",
+      nodeId: "patch",
+      activationId: "patch-1",
+    });
+  });
+
+  it("keeps a higher-authority graph and translates legacy loop metadata into honest generic stations", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root", kind: "root" });
+    state.apply({
+      type: "execution.declared",
+      graph: {
+        id: "workflow",
+        ownerThreadId: "root",
+        source: { kind: "harness" },
+        authority: "authoritative",
+        nodes: [{ id: "ship", label: "SHIP", kind: "terminal" }],
+        edges: [],
+        entryNodeIds: ["ship"],
+        terminalNodeIds: ["ship"],
+      },
+    });
+    state.apply({
+      type: "execution.declared",
+      graph: {
+        id: "workflow",
+        ownerThreadId: "root",
+        source: { kind: "inferred" },
+        authority: "suspected",
+        nodes: [{ id: "guess", label: "GUESSED", kind: "stage" }],
+        edges: [],
+        entryNodeIds: ["guess"],
+        terminalNodeIds: ["guess"],
+      },
+    });
+    state.apply({ type: "loop.configured", threadId: "root", objective: "Keep trying", verifier: "proof exists" });
+
+    const snapshot = state.snapshot();
+    expect(snapshot.executions.find((execution) => execution.id === "workflow")?.nodes.map((node) => node.label)).toEqual(["SHIP"]);
+    expect(snapshot.executions.find((execution) => execution.id.startsWith("legacy-loop:"))?.nodes.map((node) => node.label))
+      .toEqual(["ATTEMPT", "VERIFY", "DONE"]);
+  });
 });

@@ -3,6 +3,8 @@ import { expect, test } from "@playwright/test";
 test("yard, mascot interaction, operator controls, and retry flow render", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  const health = await (await page.request.get("/healthz")).json();
+  expect(health).toEqual({ service: "watchdog-dashboard" });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "No running sessions" })).toBeVisible();
   await expect(page.getByText("No running sessions · Watchdog runtime offline")).toBeVisible();
@@ -62,6 +64,12 @@ test("yard, mascot interaction, operator controls, and retry flow render", async
   await page.mouse.move(box!.x + box!.width * .75, box!.y + box!.height * .1);
   await expect.poll(() => canvas.evaluate((node) => node.style.cursor)).toBe("default");
 
+  // A declared subgraph station opens a nested Yard without losing the parent.
+  await page.mouse.click(box!.x + box!.width * (527 / 1100), box!.y + box!.height * (325 / 680));
+  await expect(page.getByRole("button", { name: "Repair yard" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Checkout repair" })).toBeVisible();
+  await page.getByRole("button", { name: "Checkout repair" }).click();
+
   // A Yard carriage must open that exact subagent's operational details first.
   await page.mouse.click(box!.x + box!.width * (520 / 1100), box!.y + box!.height * (205 / 680));
   const inspector = page.locator(".inspector");
@@ -77,7 +85,27 @@ test("yard, mascot interaction, operator controls, and retry flow render", async
   expect(await inspector.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   await page.screenshot({ path: "test-results/yard-child-inspector.png", fullPage: true });
 
+  const splitter = page.getByRole("separator", { name: "Resize inspector" });
+  await expect(splitter).toBeVisible();
+  const inspectorBeforeResize = await inspector.boundingBox();
+  const splitterBox = await splitter.boundingBox();
+  expect(inspectorBeforeResize).not.toBeNull();
+  expect(splitterBox).not.toBeNull();
+  await page.mouse.move(splitterBox!.x + splitterBox!.width / 2, splitterBox!.y + splitterBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(splitterBox!.x - 80, splitterBox!.y + splitterBox!.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => (await inspector.boundingBox())?.width ?? 0).toBeGreaterThan(inspectorBeforeResize!.width + 60);
+  const persistedInspectorWidth = Number(await page.evaluate(() => window.localStorage.getItem("watchdog.inspector-width")));
+  expect(persistedInspectorWidth).toBeGreaterThan(inspectorBeforeResize!.width + 60);
+  const widthBeforeKeyboardResize = (await inspector.boundingBox())!.width;
+  await splitter.press("ArrowRight");
+  await expect.poll(async () => (await inspector.boundingBox())?.width ?? 0).toBeLessThan(widthBeforeKeyboardResize);
+  await splitter.dblclick();
+  await expect.poll(async () => (await inspector.boundingBox())?.width ?? 0).toBeCloseTo(340, 0);
+
   await page.setViewportSize({ width: 620, height: 900 });
+  await expect(splitter).toBeHidden();
   const narrowBox = await canvas.boundingBox();
   expect(narrowBox).not.toBeNull();
   expect(narrowBox!.width / narrowBox!.height).toBeCloseTo(1100 / 680, 2);
@@ -87,8 +115,10 @@ test("yard, mascot interaction, operator controls, and retry flow render", async
   await page.setViewportSize({ width: 1440, height: 900 });
 
   await page.getByRole("button", { name: "OPERATOR" }).click();
-  await expect(page.getByRole("heading", { name: "Execution graph" })).toBeVisible();
-  await expect(page.getByText("DEMO · RUN TOPOLOGY")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Execution + subagents" })).toBeVisible();
+  await expect(page.getByText("DEMO · NORMALIZED RUNTIME")).toBeVisible();
+  await expect(page.getByText("SEMANTIC EXECUTIONS")).toBeVisible();
+  await expect(page.getByText("SOAK TEST")).toBeVisible();
   await expect(page.getByText("Mirror").first()).toBeVisible();
   await expect(page.getByText("20 clean checkout runs and the regression suite passes")).toBeVisible();
 
@@ -107,7 +137,7 @@ test("yard, mascot interaction, operator controls, and retry flow render", async
   await expect(page.getByText("Continue with one investigator and only verified evidence").first()).toBeVisible();
   await page.screenshot({ path: "test-results/operator.png", fullPage: true });
 
-  await page.getByRole("button", { name: "YARD" }).click();
+  await page.getByRole("button", { name: "YARD", exact: true }).click();
   await page.getByRole("button", { name: "Toggle day and night" }).click();
   await expect(canvas).toBeVisible();
   await page.screenshot({ path: "test-results/yard-night.png", fullPage: true });

@@ -3,10 +3,11 @@ import { appendFile, mkdir } from "node:fs/promises";
 import net from "node:net";
 import { join } from "node:path";
 import { CodexAppServerAdapter } from "../codex/adapters.js";
-import type { WatchdogEvent } from "../codex/normalizer.js";
+import type { WatchdogEvent } from "../adapters/events.js";
 import { CodexAppServerClient } from "../codex/protocol.js";
 import { createRuntimeControlHandlers } from "./adapter.js";
 import { startRunControlServer } from "./control.js";
+import { createRunId } from "./registry.js";
 import { RuntimeState } from "./state.js";
 
 const CODEX_BIN = process.env.WATCHDOG_CODEX_BIN ?? "codex";
@@ -14,6 +15,7 @@ const CODEX_BIN = process.env.WATCHDOG_CODEX_BIN ?? "codex";
 export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number> {
   const port = await freePort();
   const remoteAddress = `ws://127.0.0.1:${port}`;
+  const runId = createRunId("codex");
   let appServer: ChildProcess | undefined;
   let codex: ChildProcess | undefined;
   let client: CodexAppServerClient | undefined;
@@ -32,7 +34,11 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
   process.once("SIGTERM", () => forward("SIGTERM"));
 
   try {
-    appServer = spawn(CODEX_BIN, ["app-server", "--listen", remoteAddress], { stdio: ["ignore", "pipe", "pipe"] });
+    appServer = spawn(
+      CODEX_BIN,
+      [...watchdogMcpConfigArgs(runId), "app-server", "--listen", remoteAddress],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
     appServer.on("error", (error) => logs.diagnostic("app-server", `could not start: ${error.message}`));
     appServer.stderr?.on("data", (chunk) => {
       const line = chunk.toString().trim();
@@ -50,12 +56,17 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
     };
     adapter.onEvent(recordEvent);
     await adapter.start();
-    control = await startRunControlServer(createRuntimeControlHandlers(adapter, state, recordEvent), adapter.descriptor, { startedAt: state.startedAt });
+    control = await startRunControlServer(
+      createRuntimeControlHandlers(adapter, state, recordEvent),
+      adapter.descriptor,
+      { runId, startedAt: state.startedAt },
+    );
     console.error("[watchdog] live control attached over a loopback-only WebSocket");
     console.error(`[watchdog] run id: ${control.runId}`);
     console.error(`[watchdog] event trace: ${logs.eventPath}`);
     console.error(`[watchdog] diagnostics: ${logs.diagnosticPath}`);
     console.error(`[watchdog] terminal controls ready: ${control.path}`);
+    console.error("[watchdog] Codex execution instrumentation available through MCP");
 
     codex = spawn(CODEX_BIN, ["--remote", remoteAddress, ...codexArgs], { cwd: process.cwd(), stdio: "inherit" });
     return await new Promise<number>((resolve, reject) => {
@@ -68,6 +79,29 @@ export async function runCodexWithWatchdog(codexArgs: string[]): Promise<number>
     await cleanup();
     await logs.flush();
   }
+}
+
+export function watchdogMcpConfigArgs(
+  runId: string,
+  invocation: { execPath?: string; execArgv?: string[]; scriptPath?: string } = {},
+): string[] {
+  const command = invocation.execPath ?? process.execPath;
+  const scriptPath = invocation.scriptPath ?? process.argv[1];
+  if (!scriptPath) throw new Error("Watchdog could not determine its CLI path for the Codex MCP bridge.");
+  const execArgv = (invocation.execArgv ?? process.execArgv).filter((value) =>
+    !value.startsWith("--inspect") && !value.startsWith("--debug"),
+  );
+  const args = [...execArgv, scriptPath, "mcp", "--run", runId];
+  return [
+    "-c", `mcp_servers.watchdog.command=${JSON.stringify(command)}`,
+    "-c", `mcp_servers.watchdog.args=${JSON.stringify(args)}`,
+    "-c", "mcp_servers.watchdog.required=true",
+    "-c", "mcp_servers.watchdog.enabled=true",
+    "-c", 'mcp_servers.watchdog.enabled_tools=["watchdog_execution"]',
+    "-c", 'mcp_servers.watchdog.default_tools_approval_mode="approve"',
+    "-c", "mcp_servers.watchdog.startup_timeout_sec=10",
+    "-c", "mcp_servers.watchdog.tool_timeout_sec=30",
+  ];
 }
 
 type RunLogs = {

@@ -64,6 +64,7 @@ describe("TUI inspector viewport content", () => {
     const child: AgentCapabilities = {
       observe: capability(true),
       steer: capability(false),
+      followUp: capability(false),
       interrupt: capability(true),
       retry: capability(false),
       modelOverride: capability(false),
@@ -71,13 +72,14 @@ describe("TUI inspector viewport content", () => {
     const root: AgentCapabilities = {
       observe: capability(true),
       steer: capability(true),
+      followUp: capability(true),
       interrupt: capability(true),
       retry: capability(true),
       modelOverride: capability(true),
     };
 
     expect(availableControlHints(child)).toEqual(["x stop"]);
-    expect(availableControlHints(root)).toEqual(["s steer", "x stop", "r retry"]);
+    expect(availableControlHints(root)).toEqual(["s steer", "f follow-up", "x stop", "r retry"]);
     expect(availableControlHints()).toEqual([]);
   });
 });

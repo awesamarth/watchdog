@@ -1,13 +1,13 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { WatchdogDemoAdapter } from "../demo/adapter.js";
-import type { WatchdogEvent } from "../codex/normalizer.js";
+import type { WatchdogEvent } from "../adapters/events.js";
 import { runDashboard } from "../server/dashboard.js";
 import { createRuntimeControlHandlers } from "./adapter.js";
 import { startRunControlServer } from "./control.js";
 import { RuntimeState } from "./state.js";
 
-export async function runDeterministicDemo(args: string[]): Promise<void> {
+export async function runDeterministicDemo(args: string[], options: { openBrowser?: boolean } = {}): Promise<void> {
   const state = new RuntimeState();
   const adapter = new WatchdogDemoAdapter(state);
   const eventLog = await createEventLog();
@@ -23,7 +23,7 @@ export async function runDeterministicDemo(args: string[]): Promise<void> {
   console.log(`[watchdog] demo run id: ${control.runId}`);
   console.log(`[watchdog] demo trace: ${eventLog}`);
   try {
-    await runDashboard(args, { preferredView: "demo" });
+    await runDashboard(args, { preferredView: "demo", openBrowser: options.openBrowser });
   } finally {
     await adapter.stop();
     await control.close();

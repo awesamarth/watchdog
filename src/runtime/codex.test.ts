@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRunLogs } from "./codex.js";
+import { createRunLogs, watchdogMcpConfigArgs } from "./codex.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -25,5 +25,20 @@ describe("Codex run logs", () => {
     expect(terminal).not.toHaveBeenCalled();
     expect(await readFile(logs.eventPath, "utf8")).toContain('"type":"thread.started"');
     expect(await readFile(logs.diagnosticPath, "utf8")).toContain("[app-server] synthetic diagnostic");
+  });
+
+  it("builds a run-scoped required Watchdog MCP config for the owned App Server", () => {
+    const args = watchdogMcpConfigArgs("codex-run-123", {
+      execPath: "/usr/local/bin/node",
+      execArgv: ["--import", "/tmp/tsx-loader.mjs", "--inspect=9229"],
+      scriptPath: "/opt/watchdog/dist/cli.js",
+    });
+    const joined = args.join(" ");
+
+    expect(joined).toContain('mcp_servers.watchdog.command="/usr/local/bin/node"');
+    expect(joined).toContain('["--import","/tmp/tsx-loader.mjs","/opt/watchdog/dist/cli.js","mcp","--run","codex-run-123"]');
+    expect(joined).toContain("mcp_servers.watchdog.required=true");
+    expect(joined).toContain('mcp_servers.watchdog.default_tools_approval_mode="approve"');
+    expect(joined).not.toContain("--inspect");
   });
 });

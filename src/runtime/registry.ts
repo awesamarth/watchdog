@@ -20,7 +20,7 @@ export type RegistryOptions = {
   cwd?: string;
 };
 
-export function watchdogHome(home = process.env.WATCHDOG_HOME ?? join(homedir(), ".watchdog")): string {
+function watchdogHome(home = process.env.WATCHDOG_HOME ?? join(homedir(), ".watchdog")): string {
   return resolve(home);
 }
 

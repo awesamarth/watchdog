@@ -1,7 +1,7 @@
-import type { WatchdogEvent } from "../codex/normalizer.js";
+import type { WatchdogEvent } from "./events.js";
 
-export type AdapterMode = "live" | "observed";
-export type AdapterTransport = "app-server" | "jsonl";
+type AdapterMode = "live" | "observed";
+type AdapterTransport = "app-server" | "jsonl";
 
 export type AdapterDescriptor = {
   harness: "codex" | "pi" | "claude" | string;
@@ -14,6 +14,7 @@ export type Capability = { available: boolean; reason?: string };
 export type AgentCapabilities = {
   observe: Capability;
   steer: Capability;
+  followUp: Capability;
   interrupt: Capability;
   retry: Capability;
   modelOverride: Capability;
@@ -42,6 +43,7 @@ export interface HarnessAdapter {
   stop(): Promise<void>;
   capabilities(target: AdapterTarget): AgentCapabilities;
   steer(target: AdapterTarget, message: string): Promise<unknown>;
+  followUp(target: AdapterTarget, message: string): Promise<unknown>;
   interrupt(target: AdapterTarget): Promise<unknown>;
   retry(target: AdapterTarget, options: RetryOptions): Promise<unknown>;
 }

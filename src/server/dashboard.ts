@@ -1,11 +1,12 @@
+import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sirv from "sirv";
 import { WebSocket, WebSocketServer } from "ws";
-import { requestControlAt, RunUnavailableError, type ControlRequest } from "../runtime/control.js";
-import { listRegisteredRuns, unregisterRun, type RegisteredRun } from "../runtime/registry.js";
+import { createDemoSnapshot } from "../demo/adapter.js";
+import { listReachableRuns, requestControlAt, type ControlRequest, type ReachableRun } from "../runtime/control.js";
 import type { RunSnapshot } from "../runtime/state.js";
 
 type RunListItem = {
@@ -26,11 +27,21 @@ type DashboardState = {
   selectedRunId?: string;
 };
 type DashboardView = "live" | "demo";
-type ActiveRun = { registration: RegisteredRun; snapshot: RunSnapshot };
+type ActiveRun = ReachableRun;
 type SocketSubscription = { view: DashboardView; runId?: string; serialized?: string };
+type DashboardOptions = { preferredView?: DashboardView; openBrowser?: boolean };
 
-export async function runDashboard(args: string[], options: { preferredView?: DashboardView } = {}): Promise<void> {
+export async function runDashboard(args: string[], options: DashboardOptions = {}): Promise<void> {
   const port = parsePort(args);
+  const preferredView = options.preferredView ?? "live";
+  const url = dashboardUrl(port, preferredView);
+  const shouldOpenBrowser = options.openBrowser ?? true;
+  if (await isWatchdogDashboard(port)) {
+    console.log(`[watchdog] dashboard already running: ${url}`);
+    if (shouldOpenBrowser) await openBrowser(url);
+    if (preferredView === "demo") await waitForTermination();
+    return;
+  }
   const preferredCwd = resolve(process.cwd());
   const assets = dashboardAssetsPath();
   const serveStatic = sirv(assets, { single: true, dev: true });
@@ -61,6 +72,9 @@ export async function runDashboard(args: string[], options: { preferredView?: Da
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const view = dashboardView(url);
       const requestedRunId = url.searchParams.get("run") ?? undefined;
+      if (url.pathname === "/healthz" && request.method === "GET") {
+        return json(response, 200, { service: "watchdog-dashboard" });
+      }
       if (url.pathname === "/api/state" && request.method === "GET") {
         catalog = await runtimeCatalog();
         return json(response, 200, dashboardState(catalog, view, requestedRunId, preferredCwd));
@@ -98,28 +112,87 @@ export async function runDashboard(args: string[], options: { preferredView?: Da
     client.once("close", () => subscriptions.delete(client));
     client.send(serialized);
   });
-  const refreshTimer = setInterval(() => void refresh(), 300);
-
   try {
     await new Promise<void>((resolve, reject) => server.listen(port, "127.0.0.1", resolve).once("error", reject));
   } catch (error) {
-    if (isAddressInUse(error)) throw new Error(`Dashboard port ${port} is already in use. Reuse that dashboard or choose another with \`--port <port>\`.`);
+    if (isAddressInUse(error) && await isWatchdogDashboard(port)) {
+      console.log(`[watchdog] dashboard already running: ${url}`);
+      if (shouldOpenBrowser) await openBrowser(url);
+      if (preferredView === "demo") await waitForTermination();
+      return;
+    }
+    if (isAddressInUse(error)) throw new Error(`Dashboard port ${port} is already in use by another application. Choose another with \`--port <port>\`.`);
     throw error;
   }
-  const preferredView = options.preferredView ?? "live";
-  console.log(`[watchdog] dashboard: http://127.0.0.1:${port}${preferredView === "demo" ? "/demo" : ""}`);
+  const refreshTimer = setInterval(() => void refresh(), 300);
+  console.log(`[watchdog] dashboard: ${url}`);
   if (preferredView === "demo") {
     console.log("[watchdog] deterministic simulation is live; controls affect rehearsal state only");
   } else {
     console.log(`[watchdog] demo preview: http://127.0.0.1:${port}/demo`);
     console.log("[watchdog] start `watchdog codex` in another terminal for live data; `watchdog demo` enables interactive rehearsal controls");
   }
+  if (shouldOpenBrowser) await openBrowser(url);
   await new Promise<void>((resolve) => {
     const close = () => {
       clearInterval(refreshTimer);
       for (const client of sockets.clients) client.close();
       sockets.close();
       server.close(() => resolve());
+    };
+    process.once("SIGINT", close);
+    process.once("SIGTERM", close);
+  });
+}
+
+function dashboardUrl(port: number, view: DashboardView): string {
+  return `http://127.0.0.1:${port}${view === "demo" ? "/demo" : ""}`;
+}
+
+async function isWatchdogDashboard(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) });
+    if (response.ok && (await response.json() as { service?: string }).service === "watchdog-dashboard") return true;
+  } catch {
+    // Older Watchdog dashboards do not expose /healthz.
+  }
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/state`, { signal: AbortSignal.timeout(500) });
+    if (!response.ok) return false;
+    const state = await response.json() as { connected?: unknown; snapshot?: unknown; runs?: unknown };
+    return typeof state.connected === "boolean" && typeof state.snapshot === "object" && Array.isArray(state.runs);
+  } catch {
+    return false;
+  }
+}
+
+export function browserOpenCommand(url: string, platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
+  if (platform === "darwin") return { command: "open", args: [url] };
+  if (platform === "win32") return { command: "cmd", args: ["/c", "start", "", url] };
+  return { command: "xdg-open", args: [url] };
+}
+
+async function openBrowser(url: string): Promise<void> {
+  const { command, args } = browserOpenCommand(url);
+  const opened = await new Promise<boolean>((resolve) => {
+    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.once("error", () => resolve(false));
+    child.once("spawn", () => {
+      child.unref();
+      resolve(true);
+    });
+  });
+  console.log(opened
+    ? `[watchdog] opened in your browser: ${url}`
+    : `[watchdog] could not open a browser automatically; visit ${url}`);
+}
+
+async function waitForTermination(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const close = () => {
+      process.off("SIGINT", close);
+      process.off("SIGTERM", close);
+      resolve();
     };
     process.once("SIGINT", close);
     process.once("SIGTERM", close);
@@ -140,19 +213,19 @@ export function dashboardAssetsPath(cwd = process.cwd(), moduleUrl = import.meta
 }
 
 async function runtimeCatalog(): Promise<ActiveRun[]> {
-  const registrations = await listRegisteredRuns();
-  const runs = await Promise.all(registrations.map(async (registration) => {
-    try {
-      return {
-        registration,
-        snapshot: await requestControlAt(registration.socketPath, { action: "snapshot" }, 2_000) as RunSnapshot,
-      };
-    } catch (error) {
-      if (error instanceof RunUnavailableError) await unregisterRun(registration.runId);
-      return undefined;
-    }
+  return (await listReachableRuns({ timeoutMs: 2_000 })).map((run) => ({
+    registration: run.registration,
+    snapshot: normalizeRunSnapshot(run.snapshot),
   }));
-  return runs.filter((run): run is ActiveRun => Boolean(run));
+}
+
+function normalizeRunSnapshot(snapshot: RunSnapshot): RunSnapshot {
+  return {
+    ...snapshot,
+    agents: snapshot.agents ?? [],
+    loops: snapshot.loops ?? [],
+    executions: snapshot.executions ?? [],
+  };
 }
 
 function dashboardState(catalog: ActiveRun[], view: DashboardView, requestedRunId: string | undefined, preferredCwd: string): DashboardState {
@@ -174,7 +247,7 @@ function dashboardState(catalog: ActiveRun[], view: DashboardView, requestedRunI
     return {
       connected: false,
       snapshot: EMPTY_SNAPSHOT,
-      message: "Launch with watchdog codex to bring the yard online",
+      message: "Launch a harness through Watchdog to bring the yard online",
       runs,
     };
   }
@@ -190,7 +263,9 @@ function runListItem(run: ActiveRun): RunListItem {
     adapter: run.snapshot.adapter ?? run.registration.adapter,
     agents: run.snapshot.agents.length,
     activeAgents: run.snapshot.agents.filter((agent) => agent.activeTurnId).length,
-    objective: run.snapshot.loops[0]?.objective ?? run.snapshot.agents.find((agent) => !agent.parentThreadId)?.task,
+    objective: run.snapshot.executions.find((execution) => !execution.parentExecutionId)?.objective
+      ?? run.snapshot.loops[0]?.objective
+      ?? run.snapshot.agents.find((agent) => !agent.parentThreadId)?.task,
   };
 }
 
@@ -203,54 +278,10 @@ const EMPTY_SNAPSHOT: RunSnapshot = {
   mode: "live",
   agents: [],
   loops: [],
+  executions: [],
 };
 
-const DEMO_SNAPSHOT = demoSnapshot();
-
-function demoSnapshot(): RunSnapshot {
-  const root = "demo-root";
-  return {
-    startedAt: new Date(Date.now() - 284_000).toISOString(),
-    mode: "live",
-    adapter: { harness: "watchdog-demo", transport: "simulation", mode: "live", label: "Watchdog deterministic simulation" },
-    loops: [{
-      threadId: root,
-      objective: "Repair the flaky checkout flow and prove the fix",
-      iteration: 3,
-      activeTurnId: "demo-turn",
-      phase: "execute",
-      verifier: "20 clean checkout runs and the regression suite passes",
-      verification: { status: "running", summary: "12/20 clean runs" },
-      evidence: [
-        { id: "demo-proof-1", iteration: 2, summary: "Race reproduced when two payment callbacks overlap", source: "Locke", agentThreadId: "demo-locke", at: new Date(Date.now() - 90_000).toISOString() },
-        { id: "demo-proof-2", iteration: 3, summary: "Regression suite is green; soak verification still running", source: "Turing", agentThreadId: "demo-turing", at: new Date(Date.now() - 25_000).toISOString() },
-      ],
-      budget: { maxTokens: 200_000, maxIterations: 5, usedTokens: 166_354 },
-      warnings: ["Kepler model differs from request"],
-    }, {
-      threadId: "demo-curie",
-      objective: "Trace payment mutations and return one reproducible cause",
-      iteration: 2,
-      activeTurnId: "demo-curie-turn",
-      phase: "verify",
-      verifier: "A nested verifier reproduces the mutation ordering",
-      verification: { status: "running" },
-      evidence: [{ id: "nested-proof-1", iteration: 1, summary: "Duplicate callback enters before the first transaction commits", source: "Curie", agentThreadId: "demo-curie", at: new Date(Date.now() - 40_000).toISOString() }],
-      budget: { maxTokens: 45_000, maxIterations: 3, usedTokens: 25_112 },
-      warnings: [],
-    }],
-    agents: [
-      { threadId: root, status: "active", activeTurnId: "demo-turn", totalTokens: 68_420, outputTokens: 4_812, effective: { model: "gpt-5.6-terra", effort: "medium" }, latestActivity: { tool: "wait", status: "inProgress" } },
-      { threadId: "demo-locke", parentThreadId: root, nickname: "Locke", role: "investigator", status: "active", activeTurnId: "demo-locke-turn", totalTokens: 22_184, outputTokens: 1_620, requested: { model: "gpt-5.6-luna", effort: "low", prompt: "Trace the checkout race and return evidence." }, effective: { model: "gpt-5.6-luna", effort: "low" }, latestActivity: { tool: "exec", status: "inProgress" }, latestMessage: "Race reproduced; checking callback ordering before the final report.", messages: [{ id: "demo-locke-note", text: "Started tracing the checkout callback ordering.", at: new Date(Date.now() - 55_000).toISOString() }, { id: "demo-locke-report", text: "Race reproduced; checking callback ordering before the final report.", at: new Date(Date.now() - 18_000).toISOString() }], messageCount: 2, streamingMessage: { itemId: "demo-locke-live", text: "Preparing the next verified update…", startedAt: new Date(Date.now() - 2_000).toISOString(), updatedAt: new Date().toISOString() } },
-      { threadId: "demo-kepler", parentThreadId: root, nickname: "Kepler", role: "verifier", status: "active", activeTurnId: "demo-kepler-turn", totalTokens: 31_902, outputTokens: 2_090, requested: { model: "gpt-5.6-luna", effort: "low", prompt: "Reproduce and verify the proposed fix." }, effective: { model: "gpt-5.6-terra", effort: "medium" }, latestActivity: { tool: "test", status: "inProgress" } },
-      { threadId: "demo-hopper", parentThreadId: root, nickname: "Hopper", role: "reviewer", status: "active", activeTurnId: "demo-hopper-turn", totalTokens: 8_440, outputTokens: 702, requested: { prompt: "Review the patch for regressions." }, effective: { model: "gpt-5.6-luna", effort: "low" }, latestActivity: { tool: "review", status: "inProgress" } },
-      { threadId: "demo-curie", parentThreadId: root, nickname: "Curie", role: "investigator", status: "active", activeTurnId: "demo-curie-turn", totalTokens: 16_208, outputTokens: 1_044, requested: { model: "gpt-5.6-luna", effort: "low", prompt: "Inspect payment traces for duplicate mutations." }, effective: { model: "gpt-5.6-luna", effort: "low" }, latestActivity: { tool: "search", status: "inProgress" } },
-      { threadId: "demo-turing", parentThreadId: root, nickname: "Turing", role: "verifier", status: "active", activeTurnId: "demo-turing-turn", totalTokens: 12_880, outputTokens: 934, requested: { model: "gpt-5.6-luna", effort: "medium", prompt: "Build a minimal deterministic regression case." }, effective: { model: "gpt-5.6-luna", effort: "medium" }, latestActivity: { tool: "exec", status: "inProgress" } },
-      { threadId: "demo-ada", parentThreadId: root, nickname: "Ada", role: "reviewer", status: "idle", totalTokens: 6_320, outputTokens: 511, requested: { prompt: "Check the final evidence against the exit criterion." }, effective: { model: "gpt-5.6-luna", effort: "low" }, latestActivity: { tool: "wait", status: "completed" } },
-      { threadId: "demo-feynman", parentThreadId: "demo-curie", nickname: "Feynman", role: "verifier", status: "active", activeTurnId: "demo-feynman-turn", totalTokens: 8_904, outputTokens: 608, requested: { model: "gpt-5.6-luna", effort: "low", prompt: "Independently reproduce Curie's proposed callback ordering." }, effective: { model: "gpt-5.6-luna", effort: "low" }, latestActivity: { tool: "test", status: "inProgress" } },
-    ],
-  };
-}
+const DEMO_SNAPSHOT = createDemoSnapshot();
 
 function parsePort(args: string[]): number {
   const index = args.indexOf("--port");

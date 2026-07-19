@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { WatchdogEvent } from "./normalizer.js";
+import type { WatchdogEvent } from "../adapters/events.js";
 
 type JsonObject = Record<string, unknown>;
 type TailState = { offset: number; remainder: string; accepted?: boolean; threadId?: string; activeTurnId?: string; calls: Map<string, string> };
@@ -73,7 +73,7 @@ export class CodexJsonlObserver extends EventEmitter {
       const nickname = text(payload.agent_nickname) ?? text(spawnInfo.agent_nickname);
       const role = text(spawnInfo.agent_role);
       const agentPath = text(payload.agent_path) ?? text(spawnInfo.agent_path);
-      this.#emit({ type: "thread.started", threadId, parentThreadId, nickname, role });
+      this.#emit({ type: "thread.started", threadId, parentThreadId, nickname, role, kind: parentThreadId ? "native-child" : "root" });
       if (parentThreadId) {
         this.#emit({ type: "agent.spawned", parentThreadId, agentThreadId: threadId, agentPath, state: "observed" });
         const taskName = agentPath?.split("/").filter(Boolean).at(-1);

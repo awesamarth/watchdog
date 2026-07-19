@@ -2,16 +2,17 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import type { AgentCapabilities } from "../adapters/types.js";
 import { requestControl } from "../runtime/control.js";
+import type { ExecutionGraphState } from "../execution/types.js";
 import type { AgentState, RunSnapshot } from "../runtime/state.js";
 
-type Mode = "normal" | "steer" | "retry";
+type Mode = "normal" | "steer" | "followUp" | "retry";
 type PaneFocus = "tree" | "inspector";
 type InspectorLine = { text: string; tone?: "heading" | "section" | "dim" | "live" };
 
 export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const [snapshot, setSnapshot] = useState<RunSnapshot>({ startedAt: "", mode: "live", agents: [], loops: [] });
+  const [snapshot, setSnapshot] = useState<RunSnapshot>({ startedAt: "", mode: "live", agents: [], loops: [], executions: [] });
   const [error, setError] = useState<string>();
   const [selected, setSelected] = useState(0);
   const [mode, setMode] = useState<Mode>("normal");
@@ -31,9 +32,13 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
   const treePanelWidth = Math.max(24, Math.floor((contentWidth - 1) * 0.4));
   const inspectorPanelWidth = Math.max(30, contentWidth - 1 - treePanelWidth);
   const loop = snapshot.loops[0];
-  const loopWarningRows = loop ? Math.min(loop.warnings.length, 2) + (loop.warnings.length > 2 ? 1 : 0) : 0;
-  const loopBlockHeight = loop ? 7 + loopWarningRows : 0;
-  const mainHeight = Math.max(8, rows - 5 - loopBlockHeight);
+  const execution = primaryExecution(snapshot);
+  const summaryWarnings = execution?.authority !== "legacy" ? execution?.warnings ?? [] : loop?.warnings ?? [];
+  const summaryWarningRows = Math.min(summaryWarnings.length, 2) + (summaryWarnings.length > 2 ? 1 : 0);
+  const summaryBlockHeight = execution?.authority !== "legacy"
+    ? execution ? 6 + summaryWarningRows : 0
+    : loop ? 7 + summaryWarningRows : 0;
+  const mainHeight = Math.max(8, rows - 5 - summaryBlockHeight);
   const inspectorHeight = Math.max(4, mainHeight - 3);
   const inspectorWidth = Math.max(20, inspectorPanelWidth - 4);
   const inspectorLines = useMemo(() => current ? buildInspectorLines(current, inspectorWidth) : [], [current, inspectorWidth]);
@@ -72,8 +77,11 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
         if (!current || !draft.trim()) return;
         const request = mode === "steer"
           ? { action: "steer" as const, agent: current.threadId, message: draft }
-          : { action: "retry" as const, agent: current.threadId, message: draft };
-        void requestControl(request, { runId }).then(() => setNotice(`${mode === "steer" ? "Steered" : "Retried"} ${agentName(current)}`), (reason: Error) => setNotice(`Action failed: ${reason.message}`));
+          : mode === "followUp"
+            ? { action: "followUp" as const, agent: current.threadId, message: draft }
+            : { action: "retry" as const, agent: current.threadId, message: draft };
+        const verb = mode === "steer" ? "Steered" : mode === "followUp" ? "Queued follow-up for" : "Retried";
+        void requestControl(request, { runId }).then(() => setNotice(`${verb} ${agentName(current)}`), (reason: Error) => setNotice(`Action failed: ${reason.message}`));
         setMode("normal"); setDraft("");
         return;
       }
@@ -106,9 +114,11 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
       if (key.home) { setInspectorScroll(0); return; }
       if (key.end) { setInspectorScroll(maxInspectorScroll); return; }
     }
-    if (!controllable && ["s", "r", "x"].includes(input)) { setNotice("Observed JSONL sessions are read-only; relaunch with watchdog codex for controls"); return; }
+    if (!controllable && ["s", "f", "r", "x"].includes(input)) { setNotice("Observed JSONL sessions are read-only; relaunch through Watchdog for controls"); return; }
     if (input === "s" && current && (capabilities?.steer.available ?? (Boolean(current.activeTurnId) && !current.parentThreadId))) { setMode("steer"); return; }
     if (input === "s" && current) { setNotice(capabilities?.steer.reason ?? "This adapter cannot steer the selected agent"); return; }
+    if (input === "f" && current && capabilities?.followUp.available) { setMode("followUp"); return; }
+    if (input === "f" && current) { setNotice(capabilities?.followUp.reason ?? "This adapter cannot queue a follow-up for the selected agent"); return; }
     if (input === "r" && current && (capabilities?.retry.available ?? !current.parentThreadId)) { setMode("retry"); return; }
     if (input === "r" && current) { setNotice(capabilities?.retry.reason ?? "This adapter cannot retry the selected agent"); return; }
     if (input === "x" && current?.activeTurnId) {
@@ -143,14 +153,14 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
           : <Text dimColor>No agent selected.</Text>}
       </Box>
     </Box>
-    <LoopSummary snapshot={snapshot} />
+    <ExecutionSummary snapshot={snapshot} />
     <Box marginTop={1} height={2} flexShrink={0} flexDirection="column" overflow="hidden">
       <Text wrap="truncate-end" color={notice.startsWith("Action failed") || notice.startsWith("Interrupt failed") ? "red" : "green"}>{notice || " "}</Text>
       {mode === "normal"
         ? <Text wrap="truncate-end" dimColor>{paneFocus === "tree"
           ? `TREE · ↑/↓ or j/k select agent · Tab/→ inspect${controllable ? controlHelp : " · read-only"} · q quit`
           : `INSPECT · ↑/↓ or j/k scroll · PgUp/PgDn half-page · Tab/← tree${controllable ? controlHelp : " · read-only"} · q quit`}</Text>
-        : <Text wrap="truncate-end" color="cyan">{mode === "steer" ? "Steer" : "Retry"}: {draft}█  (Enter send, Esc cancel)</Text>}
+        : <Text wrap="truncate-end" color="cyan">{mode === "steer" ? "Steer" : mode === "followUp" ? "Follow up" : "Retry"}: {draft}█  (Enter send, Esc cancel)</Text>}
     </Box>
   </Box>;
 }
@@ -166,6 +176,25 @@ function LoopSummary({ snapshot }: { snapshot: RunSnapshot }): React.JSX.Element
     <Text wrap="truncate-end" dimColor>Evidence: {loop.evidence.length} · Budget: {formatTokens(loop.budget.usedTokens)}/{formatTokens(loop.budget.maxTokens)} tokens · {loop.iteration}/{loop.budget.maxIterations ?? "∞"} iterations</Text>
     {warnings.map((warning) => <Text wrap="truncate-end" key={warning} color="yellow">⚠ {warning}</Text>)}
     {loop.warnings.length > warnings.length && <Text wrap="truncate-end" color="yellow">⚠ +{loop.warnings.length - warnings.length} more warnings</Text>}
+  </Box>;
+}
+
+function ExecutionSummary({ snapshot }: { snapshot: RunSnapshot }): React.JSX.Element | null {
+  const execution = primaryExecution(snapshot);
+  if (!execution) return <LoopSummary snapshot={snapshot} />;
+  if (execution.authority === "legacy") return <LoopSummary snapshot={snapshot} />;
+  const warnings = execution.warnings.slice(0, 2);
+  const nodes = execution.nodes.map((node) => {
+    const active = execution.activeNodeIds.includes(node.id);
+    return active ? `[${node.label}]` : node.label;
+  }).join(" → ");
+  return <Box marginTop={1} borderStyle="round" borderColor={execution.warnings.length || ["failed", "blocked"].includes(execution.status) ? "yellow" : "gray"} paddingX={1} flexDirection="column" flexShrink={0}>
+    <Text wrap="truncate-end" bold>EXECUTION · {execution.label ?? execution.id} · iteration {execution.iteration || "—"} · {execution.status}</Text>
+    <Text wrap="truncate-end">Goal: {execution.objective ?? "not declared"}</Text>
+    <Text wrap="truncate-end" dimColor>Nodes: {nodes}</Text>
+    <Text wrap="truncate-end" dimColor>Source: {execution.source.label ?? execution.source.kind} · {execution.authority} · {execution.traversals.length} transitions</Text>
+    {warnings.map((warning) => <Text wrap="truncate-end" key={warning} color="yellow">⚠ {warning}</Text>)}
+    {execution.warnings.length > warnings.length && <Text wrap="truncate-end" color="yellow">⚠ +{execution.warnings.length - warnings.length} more warnings</Text>}
   </Box>;
 }
 
@@ -203,11 +232,14 @@ export function buildInspectorLines(agent: AgentState, width: number): Inspector
   add(agentName(agent), "heading");
   add(agent.threadId, "dim");
   add(`Status: ${agent.activeTurnId ? "working" : agent.status}`);
+  if (agent.kind) add(`Type: ${agent.kind}`);
   add(`Tokens: ${formatTokens(agent.totalTokens)} total · ${formatTokens(agent.outputTokens)} output`);
+  if (agent.costUsd !== undefined) add(`Cost: $${agent.costUsd.toFixed(4)}`);
   if (agent.task) section("Task", agent.task);
   section("Requested", config(agent.requested));
   section("Effective", config(agent.effective));
   if (agent.latestActivity) section("Latest activity", `${agent.latestActivity.tool} · ${agent.latestActivity.status}`);
+  if (agent.execution) section("Execution", `${agent.execution.executionId} · node ${agent.execution.nodeId} · activation ${agent.execution.activationId}`);
   if (agent.requested?.prompt && agent.requested.prompt !== agent.task) section("Requested prompt", agent.requested.prompt);
   if (agent.streamingMessage) section("Live response", `${agent.streamingMessage.text}▋`, "live");
 
@@ -250,6 +282,7 @@ export function availableControlHints(capabilities?: AgentCapabilities): string[
   if (!capabilities) return [];
   const hints: string[] = [];
   if (capabilities.steer.available) hints.push("s steer");
+  if (capabilities.followUp.available) hints.push("f follow-up");
   if (capabilities.interrupt.available) hints.push("x stop");
   if (capabilities.retry.available) hints.push("r retry");
   return hints;
@@ -283,4 +316,15 @@ function harnessName(snapshot: RunSnapshot): string {
   if (!harness) return "CONNECTING";
   if (harness === "watchdog-demo") return "DEMO";
   return harness.replace(/[-_]+/g, " ").toUpperCase();
+}
+
+function primaryExecution(snapshot: RunSnapshot): ExecutionGraphState | undefined {
+  const rank = { suspected: 0, legacy: 1, declared: 2, authoritative: 3 };
+  return snapshot.executions
+    .filter((execution) => !execution.parentExecutionId)
+    .sort((left, right) => {
+      const activeDifference = Number(["running", "waiting", "blocked"].includes(right.status))
+        - Number(["running", "waiting", "blocked"].includes(left.status));
+      return activeDifference || rank[right.authority] - rank[left.authority];
+    })[0];
 }

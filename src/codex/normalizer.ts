@@ -1,23 +1,8 @@
 import { EventEmitter } from "node:events";
+import type { WatchdogEvent } from "../adapters/events.js";
 import { type CodexAppServerClient, type JsonObject } from "./protocol.js";
 
-export type WatchdogEvent =
-  | { type: "thread.started"; threadId: string; parentThreadId?: string; nickname?: string; role?: string }
-  | { type: "thread.status"; threadId: string; status: string }
-  | { type: "turn.started" | "turn.completed"; threadId: string; turnId: string }
-  | { type: "turn.input"; threadId: string; turnId: string; input: string }
-  | { type: "agent.message.delta"; threadId: string; itemId: string; delta: string; at?: string }
-  | { type: "agent.message"; threadId: string; itemId?: string; message: string; at?: string }
-  | { type: "loop.objective"; threadId: string; turnId: string; objective: string }
-  | { type: "agent.spawned"; parentThreadId: string; agentThreadId: string; agentPath?: string; state: string }
-  | { type: "agent.identity"; threadId: string; nickname?: string; role?: string; parentThreadId?: string }
-  | { type: "agent.activity"; threadId: string; tool: string; status: string; model?: string; reasoningEffort?: string }
-  | { type: "agent.requestedConfig"; parentThreadId: string; agentThreadId: string; prompt?: string; model?: string; reasoningEffort?: string }
-  | { type: "agent.effectiveConfig"; threadId: string; model?: string; reasoningEffort?: string }
-  | { type: "tokens.updated"; threadId: string; totalTokens?: number; outputTokens?: number }
-  | { type: "loop.configured"; threadId: string; objective?: string; verifier?: string; maxTokens?: number; maxIterations?: number }
-  | { type: "evidence.collected"; threadId: string; itemId?: string; summary: string; source: string }
-  | { type: "loop.verified"; threadId: string; status: "passed" | "failed"; summary?: string };
+export type { WatchdogEvent } from "../adapters/events.js";
 
 export class CodexEventNormalizer extends EventEmitter {
   #hydrating = new Set<string>();
@@ -121,7 +106,7 @@ export class CodexEventNormalizer extends EventEmitter {
     const firstSeen = !this.#knownThreads.has(threadId);
     this.#knownThreads.add(threadId);
     if (!firstSeen) return;
-    this.emit("event", { type: "thread.started", threadId, parentThreadId, nickname, role } satisfies WatchdogEvent);
+    this.emit("event", { type: "thread.started", threadId, parentThreadId, nickname, role, kind: parentThreadId ? "native-child" : "root" } satisfies WatchdogEvent);
     if (parentThreadId) this.emit("event", { type: "agent.spawned", parentThreadId, agentThreadId: threadId, state: "started" } satisfies WatchdogEvent);
   }
 

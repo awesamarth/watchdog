@@ -1,5 +1,5 @@
 import type { HarnessAdapter, AgentCapabilities } from "../adapters/types.js";
-import type { WatchdogEvent } from "../codex/normalizer.js";
+import type { WatchdogEvent } from "../adapters/events.js";
 import type { ControlHandlers } from "./control.js";
 import { RuntimeState, type RunSnapshot } from "./state.js";
 
@@ -23,6 +23,11 @@ export function createRuntimeControlHandlers(
       const agent = state.resolve(target);
       requireCapability(adapter.capabilities(agent).steer, "steer");
       return await adapter.steer(agent, message);
+    },
+    followUp: async (target, message) => {
+      const agent = state.resolve(target);
+      requireCapability(adapter.capabilities(agent).followUp, "send a follow-up to");
+      return await adapter.followUp(agent, message);
     },
     interrupt: async (target) => {
       const agent = state.resolve(target);
@@ -50,6 +55,37 @@ export function createRuntimeControlHandlers(
       const agent = state.resolve(target);
       recordEvent({ type: "loop.verified", threadId: agent.threadId, status, summary });
       return state.snapshot().loops.find((loop) => loop.threadId === agent.threadId);
+    },
+    declareExecution: async (graph) => {
+      const owner = state.resolve(graph.ownerThreadId);
+      const normalized = { ...graph, ownerThreadId: owner.threadId };
+      recordEvent({ type: "execution.declared", graph: normalized });
+      return state.snapshot().executions.find((execution) => execution.id === graph.id);
+    },
+    updateExecution: async ({ executionId, nodes, edges, entryNodeIds, terminalNodeIds, objective, label }) => {
+      recordEvent({ type: "execution.updated", executionId, nodes, edges, entryNodeIds, terminalNodeIds, objective, label });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
+    },
+    startExecutionIteration: async (executionId, iteration, reason) => {
+      recordEvent({ type: "execution.iteration.started", executionId, iteration, reason });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
+    },
+    startExecutionNode: async ({ executionId, nodeId, activationId, agent: target, iteration, status }) => {
+      const agent = state.resolve(target);
+      recordEvent({ type: "execution.node.started", executionId, nodeId, activationId, threadId: agent.threadId, iteration, status });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
+    },
+    completeExecutionNode: async ({ executionId, nodeId, activationId, status, summary }) => {
+      recordEvent({ type: "execution.node.completed", executionId, nodeId, activationId, status, summary });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
+    },
+    selectExecutionEdge: async ({ executionId, edgeId, traversalId, iteration }) => {
+      recordEvent({ type: "execution.edge.selected", executionId, edgeId, traversalId, iteration });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
+    },
+    completeExecution: async (executionId, status, reason) => {
+      recordEvent({ type: "execution.completed", executionId, status, reason });
+      return state.snapshot().executions.find((execution) => execution.id === executionId);
     },
   };
 }

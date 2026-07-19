@@ -1,9 +1,7 @@
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dashboardAssetsPath } from "../server/dashboard.js";
-import { requestControlAt } from "./control.js";
-import { listRegisteredRuns, unregisterRun } from "./registry.js";
-import type { RunSnapshot } from "./state.js";
+import { listReachableRuns } from "./control.js";
 
 type Check = { label: string; ok: boolean; detail: string; required?: boolean };
 
@@ -15,6 +13,9 @@ export async function runDoctor(): Promise<void> {
   const codex = spawnSync("codex", ["--version"], { encoding: "utf8" });
   const codexVersion = (codex.stdout || codex.stderr).trim();
   checks.push({ label: "Codex CLI", ok: codex.status === 0, required: true, detail: codex.status === 0 ? codexVersion : "not found on PATH" });
+  const pi = spawnSync("pi", ["--version"], { encoding: "utf8" });
+  const piVersion = (pi.stdout || pi.stderr).trim();
+  checks.push({ label: "Pi CLI", ok: pi.status === 0, detail: pi.status === 0 ? piVersion : "not found on PATH (optional unless using `watchdog pi`)" });
 
   try {
     const assets = dashboardAssetsPath();
@@ -23,21 +24,13 @@ export async function runDoctor(): Promise<void> {
     checks.push({ label: "Dashboard assets", ok: false, required: true, detail: error instanceof Error ? error.message : String(error) });
   }
 
-  const records = await listRegisteredRuns({ cwd: process.cwd() });
-  const active: Array<{ snapshot: RunSnapshot }> = [];
-  for (const record of records) {
-    try {
-      active.push({ snapshot: await requestControlAt(record.socketPath, { action: "snapshot" }) as RunSnapshot });
-    } catch {
-      await unregisterRun(record.runId);
-    }
-  }
+  const active = await listReachableRuns({ cwd: process.cwd() });
   if (active.length) {
     const agents = active.reduce((sum, run) => sum + run.snapshot.agents.length, 0);
     const harnesses = [...new Set(active.map((run) => run.snapshot.adapter?.harness ?? run.snapshot.mode))].join(", ");
     checks.push({ label: "Project runtime", ok: true, detail: `${active.length} active · ${harnesses} · ${agents} agents` });
   } else {
-    checks.push({ label: "Project runtime", ok: true, detail: "inactive (expected until `watchdog codex`, `observe`, or `demo` starts)" });
+    checks.push({ label: "Project runtime", ok: true, detail: "inactive (expected until `watchdog codex`, `watchdog pi`, `observe`, or `demo` starts)" });
   }
 
   console.log("Watchdog doctor\n");
@@ -47,6 +40,6 @@ export async function runDoctor(): Promise<void> {
     process.exitCode = 1;
     console.log(`\n${failures.length} required check${failures.length === 1 ? "" : "s"} failed.`);
   } else {
-    console.log("\nReady for a Watchdog-owned Codex run.");
+    console.log("\nReady for a Watchdog-owned run.");
   }
 }

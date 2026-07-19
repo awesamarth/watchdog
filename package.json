@@ -3,15 +3,38 @@
   "version": "0.0.1",
   "private": true,
   "description": "Local operator control plane for agentic loops and subagents.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/awesamarth/watchdog.git"
+  },
+  "homepage": "https://github.com/awesamarth/watchdog#readme",
+  "bugs": {
+    "url": "https://github.com/awesamarth/watchdog/issues"
+  },
+  "author": "awesamarth",
+  "keywords": [
+    "agents",
+    "codex",
+    "pi",
+    "subagents",
+    "agentic-loops",
+    "observability",
+    "developer-tools"
+  ],
+  "packageManager": "bun@1.3.14",
   "type": "module",
   "bin": {
     "watchdog": "dist/cli.js"
   },
+  "pi": {
+    "extensions": [
+      "./dist/pi-extension.js"
+    ]
+  },
   "files": [
     "dist",
     "web/dist",
-    "README.md",
-    "docs/demo-rehearsal.md"
+    "README.md"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
@@ -19,7 +42,7 @@
     "demo": "bun run web:build && tsx src/cli.ts demo",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
-    "build": "bun run web:build && tsup src/cli.ts --format esm --dts --clean --out-dir dist",
+    "build": "bun run web:build && tsup",
     "check": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run src web/src",
     "test:web": "playwright test"
@@ -28,19 +51,23 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "ink": "^7.1.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7",
     "sirv": "^3.0.2",
-    "ws": "^8.18.1"
+    "typebox": "1.1.38",
+    "ws": "^8.18.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.10",
     "@playwright/test": "^1.61.1",
     "@types/node": "^22.15.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.5.14",
     "@vitejs/plugin-react": "^6.0.3",
+    "react-dom": "^19.2.7",
     "tsup": "^8.5.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",

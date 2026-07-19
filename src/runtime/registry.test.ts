@@ -4,11 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AdapterDescriptor } from "../adapters/types.js";
-import { ControlRequestTimeoutError, requestControl, requestControlAt, startRunControlServer, type ControlHandlers } from "./control.js";
-import { listRegisteredRuns } from "./registry.js";
+import { ControlRequestTimeoutError, listReachableRuns, requestControl, requestControlAt, startRunControlServer, type ControlHandlers } from "./control.js";
+import { listRegisteredRuns, registerRun } from "./registry.js";
 import type { RunSnapshot } from "./state.js";
 
 describe("multi-run registry and control sockets", () => {
+  it("gives harness-neutral guidance when no run matches the directory", async () => {
+    const home = await mkdtemp(join(tmpdir(), "watchdog-empty-registry-"));
+    try {
+      await expect(requestControl({ action: "snapshot" }, { home, cwd: join(home, "project") }))
+        .rejects.toThrow("Launch a harness (Codex, Pi) through Watchdog");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("keeps simultaneous runs in one project independently addressable", async () => {
     const home = await mkdtemp(join(tmpdir(), "watchdog-registry-"));
     const cwd = join(home, "same-project");
@@ -52,9 +62,19 @@ describe("multi-run registry and control sockets", () => {
       socket.on("data", () => undefined);
     });
     await new Promise<void>((resolve, reject) => server.listen(path, resolve).once("error", reject));
+    await registerRun({
+      runId: "silent-run",
+      cwd: home,
+      socketPath: path,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      adapter: descriptor("test", "Silent fixture"),
+    }, { home });
 
     try {
       await expect(requestControlAt(path, { action: "snapshot" }, 40)).rejects.toBeInstanceOf(ControlRequestTimeoutError);
+      await expect(listReachableRuns({ home, cwd: home, timeoutMs: 40 })).resolves.toEqual([]);
+      expect(await listRegisteredRuns({ home, cwd: home })).toHaveLength(1);
     } finally {
       accepted?.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -74,10 +94,12 @@ function handlers(nickname: string, adapter: AdapterDescriptor): ControlHandlers
     adapter,
     agents: [{ threadId: `${adapter.harness}-root`, nickname, status: "idle" }],
     loops: [],
+    executions: [],
   };
   return {
     snapshot: () => snapshot,
     steer: async () => { throw new Error("fixture control failure"); },
+    followUp: async () => ({}),
     interrupt: async () => ({}),
     retry: async () => ({}),
     configureLoop: async () => ({}),
