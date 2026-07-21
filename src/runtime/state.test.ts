@@ -69,6 +69,32 @@ describe("RuntimeState", () => {
     expect(child.messages?.at(-1)?.text).toBe("Report 105");
   });
 
+  it("prefers the hydrated child task over opaque spawn metadata and retains command history", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "child", parentThreadId: "root" });
+    state.apply({
+      type: "agent.requestedConfig",
+      parentThreadId: "root",
+      agentThreadId: "child",
+      prompt: `gAAAAA${"x".repeat(100)}`,
+    });
+    state.apply({ type: "turn.input", threadId: "child", turnId: "turn-1", input: "Inspect the control path" });
+    state.apply({ type: "agent.activity", threadId: "child", itemId: "exec-1", tool: "command · rg control src", status: "inProgress", at: "2026-07-20T12:00:00.000Z" });
+    state.apply({ type: "agent.activity", threadId: "child", itemId: "exec-1", tool: "command · rg control src", status: "completed", at: "2026-07-20T12:00:01.000Z" });
+    state.apply({ type: "agent.activity", threadId: "child", itemId: "exec-2", tool: "command · sed -n 1,80p src/runtime/control.ts", status: "inProgress", at: "2026-07-20T12:00:02.000Z" });
+
+    expect(state.resolve("child")).toMatchObject({
+      task: "Inspect the control path",
+      requested: { prompt: undefined },
+      latestActivity: { tool: "command · sed -n 1,80p src/runtime/control.ts", status: "inProgress" },
+      activityCount: 2,
+      activities: [
+        { id: "exec-1", tool: "command · rg control src", status: "completed", at: "2026-07-20T12:00:01.000Z" },
+        { id: "exec-2", tool: "command · sed -n 1,80p src/runtime/control.ts", status: "inProgress", at: "2026-07-20T12:00:02.000Z" },
+      ],
+    });
+  });
+
   it("does not leave an abandoned streaming response marked live after a turn ends", () => {
     const state = new RuntimeState();
     state.apply({ type: "turn.started", threadId: "child", turnId: "turn-1" });
@@ -99,11 +125,12 @@ describe("RuntimeState", () => {
     state.apply({ type: "thread.started", threadId: "root" });
     state.apply({ type: "turn.started", threadId: "root", turnId: "turn-1" });
     state.apply({ type: "loop.configured", threadId: "root", verifier: "all tests pass", maxTokens: 100, maxIterations: 2 });
-    state.apply({ type: "tokens.updated", threadId: "root", totalTokens: 90 });
+    state.apply({ type: "tokens.updated", threadId: "root", totalTokens: 90, inputTokens: 80, outputTokens: 10 });
     state.apply({ type: "evidence.collected", threadId: "root", itemId: "proof-1", summary: "tests passed", source: "operator" });
     state.apply({ type: "loop.verified", threadId: "root", status: "passed", summary: "green suite" });
 
     const loop = state.snapshot().loops[0]!;
+    expect(state.snapshot().agents[0]).toMatchObject({ totalTokens: 90, inputTokens: 80, outputTokens: 10 });
     expect(loop).toMatchObject({ phase: "done", verifier: "all tests pass", verification: { status: "passed" }, budget: { maxTokens: 100, maxIterations: 2, usedTokens: 90 } });
     expect(loop.evidence).toHaveLength(1);
     expect(loop.warnings).toContain("token budget at 90%");
@@ -186,6 +213,99 @@ describe("RuntimeState", () => {
       nodeId: "patch",
       activationId: "patch-1",
     });
+  });
+
+  it("flags abandoned running instrumentation without fabricating completion", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root", kind: "root" });
+    state.apply({
+      type: "execution.declared",
+      graph: {
+        id: "bounded-loop",
+        ownerThreadId: "root",
+        source: { kind: "watchdog" },
+        authority: "declared",
+        nodes: [{ id: "done", label: "DONE", kind: "terminal" }],
+        edges: [],
+        entryNodeIds: ["done"],
+        terminalNodeIds: ["done"],
+      },
+    });
+    state.apply({ type: "turn.started", threadId: "root", turnId: "turn-1" });
+    state.apply({ type: "execution.iteration.started", executionId: "bounded-loop", iteration: 1 });
+    state.apply({ type: "execution.node.started", executionId: "bounded-loop", nodeId: "done", activationId: "done-1", threadId: "root" });
+    state.apply({ type: "turn.completed", threadId: "root", turnId: "turn-1" });
+
+    let execution = state.snapshot().executions[0]!;
+    expect(execution).toMatchObject({
+      status: "waiting",
+      incompleteReason: "Instrumentation incomplete: DONE never reported completion after associated work ended",
+      activeNodeIds: ["done"],
+      activations: [expect.objectContaining({ id: "done-1", status: "running" })],
+    });
+    expect(execution.warnings).toContain(execution.incompleteReason);
+
+    state.apply({ type: "execution.node.completed", executionId: "bounded-loop", nodeId: "done", activationId: "done-1", status: "passed" });
+    execution = state.snapshot().executions[0]!;
+    expect(execution.incompleteReason).toContain("terminal node passed");
+
+    state.apply({ type: "execution.completed", executionId: "bounded-loop", status: "completed" });
+    expect(state.snapshot().executions[0]).toMatchObject({
+      status: "completed",
+      incompleteReason: undefined,
+      activeNodeIds: [],
+    });
+  });
+
+  it("keeps verifier, evidence, budgets, and orchestration warnings inside the execution model", () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root", kind: "root" });
+    state.apply({
+      type: "execution.declared",
+      graph: {
+        id: "bounded-repair",
+        ownerThreadId: "root",
+        objective: "Repair until verified",
+        policy: { verifier: "the regression suite passes", maxTokens: 100, maxIterations: 3 },
+        source: { kind: "watchdog" },
+        authority: "declared",
+        nodes: [
+          { id: "patch", label: "PATCH", kind: "action" },
+          { id: "verify", label: "VERIFY", kind: "verifier" },
+        ],
+        edges: [
+          { id: "check", from: "patch", to: "verify", kind: "normal" },
+          { id: "retry", from: "verify", to: "patch", kind: "loop-back" },
+        ],
+        entryNodeIds: ["patch"],
+        terminalNodeIds: ["verify"],
+      },
+    });
+    state.apply({ type: "tokens.updated", threadId: "root", totalTokens: 90 });
+    state.apply({ type: "execution.iteration.started", executionId: "bounded-repair", iteration: 3 });
+    state.apply({ type: "execution.node.started", executionId: "bounded-repair", nodeId: "verify", activationId: "verify-3", threadId: "root", iteration: 3 });
+    state.apply({ type: "execution.node.completed", executionId: "bounded-repair", nodeId: "verify", activationId: "verify-3", status: "failed", summary: "one regression remains" });
+
+    let execution = state.snapshot().executions[0]!;
+    expect(execution).toMatchObject({
+      policy: { verifier: "the regression suite passes", maxTokens: 100, maxIterations: 3 },
+      verification: { status: "failed", summary: "one regression remains" },
+      usedTokens: 90,
+    });
+    expect(execution.warnings).toEqual(expect.arrayContaining([
+      "no evidence collected across iterations",
+      "possible runaway loop: 3 iterations without passing verification",
+      "iteration budget reached: 3/3",
+      "token budget at 90%",
+      "VERIFY failed without a selected recovery path",
+    ]));
+
+    state.apply({ type: "execution.evidence.collected", executionId: "bounded-repair", threadId: "root", summary: "failure reproduced", source: "tests" });
+    state.apply({ type: "execution.edge.selected", executionId: "bounded-repair", edgeId: "retry", traversalId: "retry-3", iteration: 3 });
+    execution = state.snapshot().executions[0]!;
+    expect(execution.evidence).toEqual([expect.objectContaining({ summary: "failure reproduced", iteration: 3 })]);
+    expect(execution.warnings).not.toContain("no evidence collected across iterations");
+    expect(execution.warnings).not.toContain("VERIFY failed without a selected recovery path");
   });
 
   it("keeps a higher-authority graph and translates legacy loop metadata into honest generic stations", () => {

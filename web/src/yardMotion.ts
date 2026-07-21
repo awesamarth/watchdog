@@ -1,4 +1,4 @@
-import type { ExecutionGraphState } from "./types";
+import type { AgentState, ExecutionGraphState } from "./types";
 
 export type ChildTrackSlot = { side: "above" | "below"; x: number; y: number };
 export type WorkflowStation = {
@@ -9,6 +9,47 @@ export type WorkflowStation = {
   subgraphId?: string;
   collapsedCount?: number;
 };
+
+export const MAX_VISIBLE_CHILDREN = 9;
+
+export function primaryYardExecution(agents: AgentState[], executions: ExecutionGraphState[]): ExecutionGraphState | undefined {
+  const root = agents.find((agent) => agent.kind === "root" && !agent.parentThreadId)
+    ?? agents.find((agent) => !agent.parentThreadId);
+  if (!root) return undefined;
+  const rank = { suspected: 0, legacy: 1, declared: 2, authoritative: 3 };
+  const strongerOwners = new Set(executions
+    .filter((execution) => execution.authority !== "legacy")
+    .map((execution) => execution.ownerThreadId));
+  return executions
+    .filter((execution) =>
+      !execution.parentExecutionId
+      && execution.ownerThreadId === root.threadId
+      && (execution.authority !== "legacy" || !strongerOwners.has(execution.ownerThreadId)),
+    )
+    .sort((left, right) => {
+      const activeDifference = Number(["running", "waiting", "blocked"].includes(right.status))
+        - Number(["running", "waiting", "blocked"].includes(left.status));
+      return activeDifference || rank[right.authority] - rank[left.authority];
+    })[0];
+}
+
+export function partitionYardChildren(children: AgentState[]): {
+  visible: AgentState[];
+  docked: AgentState[];
+  dockEnabled: boolean;
+} {
+  if (children.length <= MAX_VISIBLE_CHILDREN) {
+    return { visible: children, docked: [], dockEnabled: false };
+  }
+  const overflow = children.length - MAX_VISIBLE_CHILDREN;
+  const docked = children.filter(dockEligible).slice(0, overflow);
+  const dockedIds = new Set(docked.map((agent) => agent.threadId));
+  return {
+    visible: children.filter((agent) => !dockedIds.has(agent.threadId)),
+    docked,
+    dockEnabled: true,
+  };
+}
 
 /** Semantic targets only: elapsed animation time never changes these values. */
 export function rootTrainTargetX(active: boolean, status = "unknown"): number {
@@ -190,4 +231,12 @@ function spreadTrackXs(count: number): number[] {
   const start = count <= 2 ? 520 : 390;
   const end = count <= 2 ? 860 : 990;
   return Array.from({ length: count }, (_, index) => start + index * ((end - start) / (count - 1)));
+}
+
+function dockEligible(agent: AgentState): boolean {
+  if (agent.activeTurnId) return false;
+  const status = agent.status.toLowerCase();
+  if (["failed", "stopped", "blocked", "interrupted"].includes(status)) return false;
+  return ["idle", "done", "completed"].includes(status)
+    || agent.latestActivity?.status === "completed";
 }

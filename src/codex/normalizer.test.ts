@@ -16,6 +16,26 @@ class FakeClient extends EventEmitter {
 }
 
 describe("CodexEventNormalizer", () => {
+  it("publishes cumulative input and output token usage", () => {
+    const client = new FakeClient();
+    const events: WatchdogEvent[] = [];
+    const normalizer = new CodexEventNormalizer(client as unknown as CodexAppServerClient);
+    normalizer.on("event", (event: WatchdogEvent) => events.push(event));
+
+    client.emit("notification", "thread/tokenUsage/updated", {
+      threadId: "root",
+      tokenUsage: { total: { totalTokens: 120, inputTokens: 100, outputTokens: 20 } },
+    });
+
+    expect(events).toContainEqual({
+      type: "tokens.updated",
+      threadId: "root",
+      totalTokens: 120,
+      inputTokens: 100,
+      outputTokens: 20,
+    });
+  });
+
   it("publishes native child tool activity", () => {
     const client = new FakeClient();
     const events: WatchdogEvent[] = [];
@@ -27,7 +47,33 @@ describe("CodexEventNormalizer", () => {
       item: { id: "cmd-1", type: "commandExecution", command: "sleep 60", status: "inProgress" },
     });
 
-    expect(events).toContainEqual({ type: "agent.activity", threadId: "child", tool: "command · sleep 60", status: "inProgress" });
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.activity", threadId: "child", tool: "command · sleep 60", status: "inProgress" }));
+  });
+
+  it("shows the command inside Codex's dynamic exec wrapper", () => {
+    const client = new FakeClient();
+    const events: WatchdogEvent[] = [];
+    const normalizer = new CodexEventNormalizer(client as unknown as CodexAppServerClient);
+    normalizer.on("event", (event: WatchdogEvent) => events.push(event));
+
+    client.emit("notification", "item/started", {
+      threadId: "child",
+      item: {
+        id: "exec-1",
+        type: "dynamicToolCall",
+        tool: "exec",
+        status: "inProgress",
+        arguments: 'const r = await tools.exec_command({"cmd":"rg -n \\"assignment|spawn_agent\\" src/codex"}); text(r.output);',
+      },
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "agent.activity",
+      threadId: "child",
+      itemId: "exec-1",
+      tool: 'command · rg -n "assignment|spawn_agent" src/codex',
+      status: "inProgress",
+    }));
   });
 
   it("publishes streaming message deltas and the complete final message", () => {

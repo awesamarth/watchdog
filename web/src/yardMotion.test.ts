@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ExecutionGraphState } from "./types";
-import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, executionStations, executionTrainTargetX, rootTrainTargetX } from "./yardMotion";
+import type { AgentState, ExecutionGraphState } from "./types";
+import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, executionStations, executionTrainTargetX, partitionYardChildren, primaryYardExecution, rootTrainTargetX } from "./yardMotion";
 
 describe("rail-yard semantic motion", () => {
   it("moves a child only after its work completes", () => {
@@ -41,6 +41,31 @@ describe("rail-yard semantic motion", () => {
     expect(childTrainScale(20)).toBe(.62);
   });
 
+  it("docks the oldest completed cars after nine without hiding live or failed work", () => {
+    const child = (index: number, status = "idle", activeTurnId?: string): AgentState => ({
+      threadId: `child-${index}`,
+      parentThreadId: "root",
+      status,
+      activeTurnId,
+    });
+    const firstTen = Array.from({ length: 10 }, (_, index) => child(index));
+    expect(partitionYardChildren(firstTen)).toMatchObject({
+      visible: firstTen.slice(1),
+      docked: [firstTen[0]],
+      dockEnabled: true,
+    });
+
+    const protectedChildren = [
+      child(0, "active", "turn-0"),
+      { ...child(1, "failed"), latestActivity: { tool: "verification", status: "completed" } },
+      { ...child(2, "stopped"), latestActivity: { tool: "operator stop", status: "completed" } },
+      ...Array.from({ length: 7 }, (_, index) => child(index + 3)),
+    ];
+    const protectedPartition = partitionYardChildren(protectedChildren);
+    expect(protectedPartition.docked.map((agent) => agent.threadId)).toEqual(["child-3"]);
+    expect(protectedPartition.visible.map((agent) => agent.threadId)).toEqual(expect.arrayContaining(["child-0", "child-1", "child-2"]));
+  });
+
   it("uses START and END for an ordinary task instead of inventing a loop", () => {
     expect(executionStations()).toEqual([
       { id: "ordinary-start", x: 365, label: "START", status: "pending" },
@@ -72,6 +97,9 @@ describe("rail-yard semantic motion", () => {
       activations: [{ id: "repair-1", nodeId: "repair", iteration: 1, status: "running", threadIds: ["root"], startedAt: "2026-07-19T00:00:00.000Z" }],
       traversals: [],
       activeNodeIds: ["repair"],
+      evidence: [],
+      verification: { status: "not-run" },
+      usedTokens: 0,
       warnings: [],
     };
     const stations = executionStations(execution);
@@ -81,5 +109,24 @@ describe("rail-yard semantic motion", () => {
       { id: "ship", label: "SHIP", subgraphId: undefined },
     ]);
     expect(executionTrainTargetX(execution, true)).toBe(stations[1]?.x);
+  });
+
+  it("does not let a worker-owned execution replace the topology root Yard", () => {
+    const agents = [
+      { threadId: "root", kind: "root" as const, status: "active" },
+      { threadId: "scout", parentThreadId: "root", kind: "subprocess-worker" as const, status: "active" },
+      { threadId: "verifier", parentThreadId: "root", kind: "subprocess-worker" as const, status: "active" },
+    ];
+    const workerExecution = {
+      id: "scout-audit",
+      ownerThreadId: "scout",
+      label: "Scout audit",
+      status: "running" as const,
+      authority: "declared" as const,
+      source: { kind: "harness" as const, label: "Pi extension" },
+      nodes: [], edges: [], entryNodeIds: [], terminalNodeIds: [], activations: [], activeNodeIds: [], traversals: [], iteration: 1, evidence: [], verification: { status: "not-run" as const }, usedTokens: 0, warnings: [],
+    };
+    expect(primaryYardExecution(agents, [workerExecution])).toBeUndefined();
+    expect(agents.filter((agent) => agent.parentThreadId === "root").map((agent) => agent.threadId)).toEqual(["scout", "verifier"]);
   });
 });

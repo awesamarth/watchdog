@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { AdapterDescriptor, AgentCapabilities } from "../adapters/types.js";
+import type { AdapterDescriptor, AgentCapabilities, ExecutionCapabilities } from "../adapters/types.js";
 import type { WatchdogEvent } from "../adapters/events.js";
 import {
   EXECUTION_AUTHORITY_RANK,
@@ -15,6 +15,7 @@ import {
 type AgentConfig = { model?: string; effort?: string };
 type AgentMessage = { id: string; text: string; at: string };
 type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
+type AgentActivity = { id: string; tool: string; status: string; at: string };
 
 export type AgentState = {
   threadId: string;
@@ -26,11 +27,14 @@ export type AgentState = {
   status: string;
   activeTurnId?: string;
   totalTokens?: number;
+  inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
   requested?: AgentConfig & { prompt?: string };
   effective?: AgentConfig;
   latestActivity?: { tool: string; status: string };
+  activities?: AgentActivity[];
+  activityCount?: number;
   task?: string;
   latestMessage?: string;
   messages?: AgentMessage[];
@@ -39,6 +43,7 @@ export type AgentState = {
   execution?: { executionId: string; nodeId: string; activationId: string };
   startedAt?: string;
   lastActivityAt?: string;
+  lastTurnCompletedAt?: string;
 };
 
 export type RunSnapshot = {
@@ -49,6 +54,7 @@ export type RunSnapshot = {
   executions: ExecutionGraphState[];
   adapter?: AdapterDescriptor;
   capabilities?: Record<string, AgentCapabilities>;
+  executionCapabilities?: Record<string, ExecutionCapabilities>;
 };
 
 export type LoopState = {
@@ -142,6 +148,7 @@ export class RuntimeState extends EventEmitter {
         if (agent.activeTurnId === event.turnId) agent.activeTurnId = undefined;
         agent.streamingMessage = undefined;
         agent.lastActivityAt = new Date().toISOString();
+        agent.lastTurnCompletedAt = agent.lastActivityAt;
         const loop = this.#loops.get(event.threadId);
         if (loop?.activeTurnId === event.turnId) {
           loop.activeTurnId = undefined;
@@ -176,14 +183,42 @@ export class RuntimeState extends EventEmitter {
       }
       case "agent.activity": {
         const agent = this.#ensure(event.threadId);
+        const at = event.at ?? new Date().toISOString();
+        const activities = agent.activities ??= [];
+        const existing = event.itemId
+          ? activities.find((activity) => activity.id === event.itemId)
+          : event.status !== "inProgress"
+            ? [...activities].reverse().find((activity) => activity.tool === event.tool && activity.status === "inProgress")
+            : undefined;
+        if (existing) {
+          existing.tool = event.tool;
+          existing.status = event.status;
+          existing.at = at;
+          const index = activities.indexOf(existing);
+          if (index >= 0 && index !== activities.length - 1) activities.push(...activities.splice(index, 1));
+        } else {
+          activities.push({
+            id: event.itemId ?? `${event.threadId}:activity:${(agent.activityCount ?? 0) + 1}`,
+            tool: event.tool,
+            status: event.status,
+            at,
+          });
+          agent.activityCount = (agent.activityCount ?? 0) + 1;
+          if (activities.length > MAX_AGENT_ACTIVITIES) activities.splice(0, activities.length - MAX_AGENT_ACTIVITIES);
+        }
         agent.latestActivity = { tool: event.tool, status: event.status };
-        agent.lastActivityAt = new Date().toISOString();
+        agent.lastActivityAt = at;
         break;
       }
       case "agent.requestedConfig": {
         const agent = this.#ensure(event.agentThreadId);
         agent.parentThreadId = event.parentThreadId;
-        agent.requested = { model: event.model, effort: event.reasoningEffort, prompt: event.prompt };
+        const current = agent.requested ?? {};
+        agent.requested = {
+          model: event.model ?? current.model,
+          effort: event.reasoningEffort ?? current.effort,
+          prompt: readablePrompt(event.prompt) ?? current.prompt,
+        };
         break;
       }
       case "agent.effectiveConfig": {
@@ -194,6 +229,7 @@ export class RuntimeState extends EventEmitter {
       case "tokens.updated": {
         const agent = this.#ensure(event.threadId);
         agent.totalTokens = event.totalTokens ?? agent.totalTokens;
+        agent.inputTokens = event.inputTokens ?? agent.inputTokens;
         agent.outputTokens = event.outputTokens ?? agent.outputTokens;
         agent.costUsd = event.costUsd ?? agent.costUsd;
         break;
@@ -235,6 +271,11 @@ export class RuntimeState extends EventEmitter {
         execution.iteration = Math.max(execution.iteration, event.iteration);
         execution.status = "running";
         execution.startedAt ??= new Date().toISOString();
+        execution.completedAt = undefined;
+        execution.stopReason = undefined;
+        if (execution.policy?.verifier || execution.nodes.some((node) => node.kind === "verifier")) {
+          execution.verification = { status: "not-run" };
+        }
         break;
       }
       case "execution.node.started": {
@@ -255,6 +296,22 @@ export class RuntimeState extends EventEmitter {
         this.#selectEdge(event.executionId, event.edgeId, event.traversalId, event.iteration);
         break;
       }
+      case "execution.evidence.collected": {
+        this.#addExecutionEvidence(event.executionId, event.threadId, event.summary, event.source, event.itemId, event.nodeId);
+        break;
+      }
+      case "execution.verified": {
+        const execution = this.#execution(event.executionId);
+        execution.verification = { status: event.status, summary: event.summary, at: new Date().toISOString() };
+        if (event.status === "failed") {
+          execution.status = "blocked";
+          execution.stopReason = event.summary ?? "Execution verifier failed.";
+        } else {
+          execution.status = execution.activeNodeIds.length ? "running" : "waiting";
+          execution.stopReason = undefined;
+        }
+        break;
+      }
       case "execution.completed": {
         const execution = this.#execution(event.executionId);
         execution.status = event.status;
@@ -270,10 +327,13 @@ export class RuntimeState extends EventEmitter {
   snapshot(): RunSnapshot {
     const agents = [...this.#agents.values()].map((agent) => ({
       ...agent,
+      activities: (agent.activities ?? []).map((activity) => ({ ...activity })),
+      activityCount: agent.activityCount ?? agent.activities?.length ?? 0,
       messages: (agent.messages ?? []).map((message) => ({ ...message })),
       messageCount: agent.messageCount ?? agent.messages?.length ?? 0,
       streamingMessage: agent.streamingMessage ? { ...agent.streamingMessage } : undefined,
     }));
+    const executions = [...this.#executions.values()];
     return {
       startedAt: this.startedAt,
       mode: this.mode,
@@ -284,18 +344,27 @@ export class RuntimeState extends EventEmitter {
         budget: { ...loop.budget, usedTokens: loopTokenUse(loop.threadId, agents) },
         warnings: loopWarnings(loop, agents),
       })),
-      executions: [...this.#executions.values()].map((execution) => ({
-        ...execution,
-        source: { ...execution.source },
-        nodes: execution.nodes.map((node) => ({ ...node })),
-        edges: execution.edges.map((edge) => ({ ...edge })),
-        entryNodeIds: [...execution.entryNodeIds],
-        terminalNodeIds: [...execution.terminalNodeIds],
-        activations: execution.activations.map((activation) => ({ ...activation, threadIds: [...activation.threadIds] })),
-        traversals: execution.traversals.map((traversal) => ({ ...traversal })),
-        activeNodeIds: [...execution.activeNodeIds],
-        warnings: executionWarnings(execution),
-      })),
+      executions: executions.map((execution) => {
+        const incompleteReason = executionIncompleteReason(execution, agents);
+        return {
+          ...execution,
+          status: incompleteReason ? "waiting" : execution.status,
+          incompleteReason,
+          policy: { ...execution.policy },
+          source: { ...execution.source },
+          nodes: execution.nodes.map((node) => ({ ...node })),
+          edges: execution.edges.map((edge) => ({ ...edge })),
+          entryNodeIds: [...execution.entryNodeIds],
+          terminalNodeIds: [...execution.terminalNodeIds],
+          activations: execution.activations.map((activation) => ({ ...activation, threadIds: [...activation.threadIds] })),
+          traversals: execution.traversals.map((traversal) => ({ ...traversal })),
+          activeNodeIds: [...execution.activeNodeIds],
+          evidence: execution.evidence.map((item) => ({ ...item })),
+          verification: { ...execution.verification },
+          usedTokens: executionTokenUse(execution, agents, executions),
+          warnings: executionWarnings(execution, agents, executions, incompleteReason),
+        };
+      }),
     };
   }
 
@@ -323,6 +392,15 @@ export class RuntimeState extends EventEmitter {
       agent = this.#ensure(agent.parentThreadId);
     }
     return agent;
+  }
+
+  executionForThread(threadId: string): ExecutionGraphState | undefined {
+    const agent = this.#agents.get(threadId);
+    if (agent?.execution) return this.#executions.get(agent.execution.executionId);
+    return [...this.#executions.values()].reverse().find((execution) =>
+      execution.ownerThreadId === threadId
+      || execution.activations.some((activation) => activation.threadIds.includes(threadId)),
+    );
   }
 
   async waitForIdle(threadId: string, timeoutMs = 12_000): Promise<void> {
@@ -407,6 +485,9 @@ export class RuntimeState extends EventEmitter {
       startedAt: current?.startedAt,
       completedAt: current?.completedAt,
       stopReason: current?.stopReason,
+      evidence: current?.evidence ?? [],
+      verification: current?.verification ?? { status: "not-run" },
+      usedTokens: current?.usedTokens ?? 0,
       warnings: current?.warnings ?? [],
     });
   }
@@ -432,6 +513,7 @@ export class RuntimeState extends EventEmitter {
       ...current,
       objective: update.objective ?? current.objective,
       label: update.label ?? current.label,
+      policy: update.policy ? { ...current.policy, ...update.policy } : current.policy,
       nodes,
       edges,
       entryNodeIds: update.entryNodeIds ?? current.entryNodeIds,
@@ -470,6 +552,8 @@ export class RuntimeState extends EventEmitter {
     execution.iteration = Math.max(execution.iteration, iteration);
     execution.status = input.status === "waiting" ? "waiting" : "running";
     execution.startedAt ??= new Date().toISOString();
+    execution.completedAt = undefined;
+    execution.stopReason = undefined;
     const activation: NodeActivation = {
       id: input.id,
       nodeId: input.nodeId,
@@ -480,6 +564,9 @@ export class RuntimeState extends EventEmitter {
     };
     execution.activations.push(activation);
     execution.activeNodeIds = [...new Set([...execution.activeNodeIds, input.nodeId])];
+    if (execution.nodes.find((node) => node.id === input.nodeId)?.kind === "verifier") {
+      execution.verification = { status: "running" };
+    }
     const agent = this.#ensure(input.threadId);
     const assignedExecution = agent.execution && this.#executions.get(agent.execution.executionId);
     const assignedActivation = agent.execution && assignedExecution?.activations.find((candidate) => candidate.id === agent.execution?.activationId);
@@ -514,7 +601,18 @@ export class RuntimeState extends EventEmitter {
     )) {
       execution.activeNodeIds = execution.activeNodeIds.filter((candidate) => candidate !== nodeId);
     }
-    if (status === "failed") execution.status = "blocked";
+    const node = execution.nodes.find((candidate) => candidate.id === nodeId);
+    if (node?.kind === "verifier") {
+      execution.verification = {
+        status: status === "passed" ? "passed" : status === "failed" ? "failed" : "not-run",
+        summary,
+        at: new Date().toISOString(),
+      };
+    }
+    if (status === "failed" || status === "stopped") {
+      execution.status = "blocked";
+      execution.stopReason = summary ?? `${node?.label ?? nodeId} ${status}.`;
+    }
     else if (execution.activeNodeIds.length === 0 && execution.status !== "completed") execution.status = "waiting";
   }
 
@@ -649,6 +747,30 @@ export class RuntimeState extends EventEmitter {
       agentThreadId: threadId,
       at: new Date().toISOString(),
     });
+    const execution = this.#executions.get(legacyLoopExecutionId(loop.threadId));
+    if (execution) this.#addExecutionEvidence(execution.id, threadId, summary, source, id);
+  }
+
+  #addExecutionEvidence(
+    executionId: string,
+    threadId: string,
+    summary: string,
+    source: string,
+    itemId?: string,
+    nodeId?: string,
+  ): void {
+    const execution = this.#execution(executionId);
+    const id = itemId ?? `${executionId}:${execution.iteration}:${threadId}:${summary}`;
+    if (execution.evidence.some((item) => item.id === id)) return;
+    execution.evidence.push({
+      id,
+      iteration: Math.max(1, execution.iteration),
+      summary,
+      source,
+      threadId,
+      nodeId,
+      at: new Date().toISOString(),
+    });
   }
 
   #owningLoop(threadId: string): LoopState | undefined {
@@ -663,6 +785,14 @@ export class RuntimeState extends EventEmitter {
 }
 
 const MAX_AGENT_MESSAGES = 100;
+const MAX_AGENT_ACTIVITIES = 50;
+
+function readablePrompt(prompt?: string): string | undefined {
+  const value = prompt?.trim();
+  if (!value) return undefined;
+  if (/^gAAAAA[A-Za-z0-9_-]{80,}={0,2}$/.test(value)) return undefined;
+  return value;
+}
 
 function mergeById<T extends { id: string }>(current: T[], updates: T[]): T[] {
   const merged = new Map(current.map((value) => [value.id, value]));
@@ -678,11 +808,35 @@ function validateSubgraphLink(parent: ExecutionGraphDefinition, parentNodeId: st
   }
 }
 
-function executionWarnings(execution: ExecutionGraphState): string[] {
+function executionWarnings(
+  execution: ExecutionGraphState,
+  agents: AgentState[],
+  executions: ExecutionGraphState[],
+  incompleteReason?: string,
+): string[] {
   const warnings = [...execution.warnings];
+  if (incompleteReason) warnings.push(incompleteReason);
+  const participants = executionAgents(execution, agents, executions);
+  const usedTokens = executionTokenUse(execution, agents, executions);
+  const verifierNodes = new Set(execution.nodes.filter((node) => node.kind === "verifier").map((node) => node.id));
+  const cyclic = executionHasCycle(execution);
   if (execution.authority === "suspected") warnings.push("suspected execution shape; node boundaries are inferred");
-  if (execution.iteration >= 2 && executionHasCycle(execution) && !execution.nodes.some((node) => node.kind === "verifier")) {
+  if (execution.iteration >= 2 && cyclic && !execution.policy?.verifier && verifierNodes.size === 0) {
     warnings.push("cyclic execution has no verifier node");
+  }
+  if (cyclic && execution.iteration >= 2 && execution.evidence.length === 0) {
+    warnings.push("no evidence collected across iterations");
+  }
+  if (cyclic && execution.iteration >= 3 && execution.verification.status === "failed") {
+    warnings.push(`possible runaway loop: ${execution.iteration} iterations without passing verification`);
+  }
+  if (execution.policy?.maxIterations && execution.iteration >= execution.policy.maxIterations) {
+    warnings.push(`iteration budget reached: ${execution.iteration}/${execution.policy.maxIterations}`);
+  }
+  if (execution.policy?.maxTokens && usedTokens >= execution.policy.maxTokens) {
+    warnings.push(`token budget exceeded: ${usedTokens}/${execution.policy.maxTokens}`);
+  } else if (execution.policy?.maxTokens && usedTokens >= execution.policy.maxTokens * .8) {
+    warnings.push(`token budget at ${Math.round(usedTokens / execution.policy.maxTokens * 100)}%`);
   }
   const failures = new Map<string, number>();
   for (const activation of execution.activations) {
@@ -691,12 +845,72 @@ function executionWarnings(execution: ExecutionGraphState): string[] {
   for (const [nodeId, count] of failures) {
     if (count >= 2) warnings.push(`${execution.nodes.find((node) => node.id === nodeId)?.label ?? nodeId} failed ${count} times`);
   }
-  const unresolved = execution.edges.filter((edge) =>
-    !execution.nodes.some((node) => node.id === edge.from)
-    || !execution.nodes.some((node) => node.id === edge.to),
-  );
-  if (unresolved.length) warnings.push(`${unresolved.length} graph edges reference missing nodes`);
+  const latestByNode = latestActivations(execution);
+  for (const nodeId of verifierNodes) {
+    const activation = latestByNode.get(nodeId);
+    if (activation?.status === "waiting" && elapsedMs(activation.startedAt) >= STALLED_NODE_MS) {
+      warnings.push(`${execution.nodes.find((node) => node.id === nodeId)?.label ?? nodeId} verifier appears stalled`);
+    }
+    if (activation?.status === "failed") {
+      const recovered = execution.traversals.some((traversal) =>
+        traversal.from === nodeId
+        && traversal.iteration === activation.iteration
+        && traversal.at >= (activation.completedAt ?? activation.startedAt),
+      );
+      if (!recovered) warnings.push(`${execution.nodes.find((node) => node.id === nodeId)?.label ?? nodeId} failed without a selected recovery path`);
+    }
+  }
+  for (const node of execution.nodes) {
+    const incoming = execution.edges.filter((edge) => edge.to === node.id);
+    const activation = latestByNode.get(node.id);
+    if (incoming.length < 2 || activation?.status !== "waiting") continue;
+    const blockedBy = incoming
+      .map((edge) => latestByNode.get(edge.from))
+      .filter((candidate) => candidate?.status === "failed" || candidate?.status === "stopped");
+    if (blockedBy.length) warnings.push(`${node.label} join is blocked by ${blockedBy.length} failed or stopped predecessor${blockedBy.length === 1 ? "" : "s"}`);
+  }
+  const workers = participants.filter((agent) => agent.parentThreadId);
+  if (workers.length >= 4) warnings.push(`fan-out: ${workers.length} subagents`);
+  const activeWorkers = workers.filter((agent) => agent.activeTurnId).length;
+  if (activeWorkers >= 3) warnings.push(`${activeWorkers} subagents active concurrently`);
+  addConfigurationWarnings(warnings, workers);
+  addDuplicateAssignmentWarnings(warnings, workers);
   return [...new Set(warnings)];
+}
+
+function executionIncompleteReason(
+  execution: ExecutionGraphState,
+  agents: AgentState[],
+): string | undefined {
+  if (["completed", "failed", "stopped", "blocked"].includes(execution.status)) return undefined;
+  const byId = new Map(agents.map((agent) => [agent.threadId, agent]));
+  const owner = byId.get(execution.ownerThreadId);
+  const ownerActive = Boolean(owner?.activeTurnId);
+  const liveStatuses = new Set(["queued", "running", "waiting"]);
+  const activeActivations = execution.activations.filter((activation) => liveStatuses.has(activation.status));
+  const associatedAgentActive = activeActivations.some((activation) =>
+    activation.threadIds.some((threadId) => Boolean(byId.get(threadId)?.activeTurnId)),
+  );
+  if (ownerActive || associatedAgentActive || !owner?.lastTurnCompletedAt) return undefined;
+
+  const abandoned = activeActivations.filter((activation) => activation.status !== "waiting");
+  if (abandoned.length) {
+    const labels = [...new Set(abandoned.map((activation) =>
+      execution.nodes.find((node) => node.id === activation.nodeId)?.label ?? activation.nodeId,
+    ))];
+    return `Instrumentation incomplete: ${labels.join(", ")} never reported completion after associated work ended`;
+  }
+
+  const terminalPassed = execution.activations.some((activation) =>
+    execution.terminalNodeIds.includes(activation.nodeId) && activation.status === "passed",
+  );
+  if (terminalPassed) {
+    return "Instrumentation incomplete: a terminal node passed, but execution completion was not reported";
+  }
+  if (execution.status === "running" && execution.startedAt) {
+    return "Instrumentation incomplete: execution is marked running with no associated work active";
+  }
+  return undefined;
 }
 
 function loopWarnings(loop: LoopState, agents: AgentState[]): string[] {
@@ -711,22 +925,83 @@ function loopWarnings(loop: LoopState, agents: AgentState[]): string[] {
   if (descendants.length >= 4) warnings.push(`fan-out: ${descendants.length} subagents`);
   const active = descendants.filter((agent) => agent.activeTurnId).length;
   if (active >= 3) warnings.push(`${active} subagents active concurrently`);
-  for (const agent of descendants) {
-    if (agent.requested?.model && agent.effective?.model && agent.requested.model !== agent.effective.model) warnings.push(`${agent.nickname ?? agent.threadId.slice(0, 8)} model differs from request`);
-    if (agent.requested?.effort && agent.effective?.effort && agent.requested.effort !== agent.effective.effort) warnings.push(`${agent.nickname ?? agent.threadId.slice(0, 8)} effort differs from request`);
-  }
-  const assignments = new Map<string, AgentState[]>();
-  for (const agent of descendants) {
-    const prompt = normalizeAssignment(agent.requested?.prompt);
-    if (prompt) assignments.set(prompt, [...(assignments.get(prompt) ?? []), agent]);
-  }
-  for (const duplicates of assignments.values()) if (duplicates.length >= 2) warnings.push(`duplicate assignment across ${duplicates.length} subagents`);
+  addConfigurationWarnings(warnings, descendants);
+  addDuplicateAssignmentWarnings(warnings, descendants);
   return warnings;
 }
 
 function loopTokenUse(rootThreadId: string, agents: AgentState[]): number {
   return agents.filter((agent) => agent.threadId === rootThreadId || belongsTo(rootThreadId, agent, agents)).reduce((sum, agent) => sum + (agent.totalTokens ?? 0), 0);
 }
+
+function executionTokenUse(
+  execution: ExecutionGraphState,
+  agents: AgentState[],
+  executions: ExecutionGraphState[],
+): number {
+  return executionAgents(execution, agents, executions).reduce((sum, agent) => sum + (agent.totalTokens ?? 0), 0);
+}
+
+function executionAgents(
+  execution: ExecutionGraphState,
+  agents: AgentState[],
+  executions: ExecutionGraphState[],
+): AgentState[] {
+  const executionIds = new Set([execution.id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const candidate of executions) {
+      if (candidate.parentExecutionId && executionIds.has(candidate.parentExecutionId) && !executionIds.has(candidate.id)) {
+        executionIds.add(candidate.id);
+        grew = true;
+      }
+    }
+  }
+  const ids = new Set<string>();
+  for (const candidate of executions) {
+    if (!executionIds.has(candidate.id)) continue;
+    ids.add(candidate.ownerThreadId);
+    for (const activation of candidate.activations) {
+      for (const threadId of activation.threadIds) ids.add(threadId);
+    }
+  }
+  for (const agent of agents) {
+    if (agent.execution && executionIds.has(agent.execution.executionId)) ids.add(agent.threadId);
+  }
+  return agents.filter((agent) => ids.has(agent.threadId));
+}
+
+function latestActivations(execution: ExecutionGraphState): Map<string, NodeActivation> {
+  const latest = new Map<string, NodeActivation>();
+  for (const activation of execution.activations) latest.set(activation.nodeId, activation);
+  return latest;
+}
+
+function elapsedMs(timestamp: string): number {
+  const startedAt = Date.parse(timestamp);
+  return Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : 0;
+}
+
+function addConfigurationWarnings(warnings: string[], agents: AgentState[]): void {
+  for (const agent of agents) {
+    if (agent.requested?.model && agent.effective?.model && agent.requested.model !== agent.effective.model) warnings.push(`${agent.nickname ?? agent.threadId.slice(0, 8)} model differs from request`);
+    if (agent.requested?.effort && agent.effective?.effort && agent.requested.effort !== agent.effective.effort) warnings.push(`${agent.nickname ?? agent.threadId.slice(0, 8)} effort differs from request`);
+  }
+}
+
+function addDuplicateAssignmentWarnings(warnings: string[], agents: AgentState[]): void {
+  const assignments = new Map<string, AgentState[]>();
+  for (const agent of agents) {
+    const prompt = normalizeAssignment(agent.requested?.prompt);
+    if (prompt) assignments.set(prompt, [...(assignments.get(prompt) ?? []), agent]);
+  }
+  for (const duplicates of assignments.values()) {
+    if (duplicates.length >= 2) warnings.push(`duplicate assignment across ${duplicates.length} subagents`);
+  }
+}
+
+const STALLED_NODE_MS = 120_000;
 
 function normalizeAssignment(value?: string): string | undefined {
   const normalized = value?.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9 ]/g, "").trim();

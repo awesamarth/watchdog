@@ -1,12 +1,30 @@
 import { EventEmitter } from "node:events";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { WatchdogEvent } from "../adapters/events.js";
+import { codexToolLabel } from "./activity.js";
 
 type JsonObject = Record<string, unknown>;
-type TailState = { offset: number; remainder: string; accepted?: boolean; threadId?: string; activeTurnId?: string; calls: Map<string, string> };
+type TailState = {
+  offset: number;
+  remainder: string;
+  accepted?: boolean;
+  metadataSeen: boolean;
+  bootstrapped: boolean;
+  decoder: StringDecoder;
+  threadId?: string;
+  activeTurnId?: string;
+  calls: Map<string, string>;
+};
 type PendingSpawn = { parentThreadId: string; taskName?: string; prompt?: string };
-export type CodexJsonlObserverOptions = { sessionsRoot: string; cwd: string; intervalMs?: number; sessionId?: string };
+export type CodexJsonlObserverOptions = {
+  sessionsRoot: string;
+  cwd: string;
+  intervalMs?: number;
+  sessionId?: string;
+  bootstrapBytes?: number;
+};
 
 export class CodexJsonlObserver extends EventEmitter {
   #files = new Map<string, TailState>();
@@ -38,19 +56,66 @@ export class CodexJsonlObserver extends EventEmitter {
   async #pump(path: string): Promise<void> {
     const info = await stat(path).catch(() => undefined);
     if (!info?.isFile()) return;
-    const tail = this.#files.get(path) ?? { offset: 0, remainder: "", calls: new Map<string, string>() };
-    this.#files.set(path, tail);
-    if (info.size < tail.offset) { tail.offset = 0; tail.remainder = ""; tail.accepted = undefined; }
+    let tail = this.#files.get(path);
+    if (!tail) {
+      const header = await readSessionHeader(path);
+      if (!header) return;
+      tail = {
+        offset: header.nextOffset,
+        remainder: "",
+        metadataSeen: false,
+        bootstrapped: false,
+        decoder: new StringDecoder("utf8"),
+        calls: new Map<string, string>(),
+      };
+      this.#files.set(path, tail);
+      this.#consume(header.line, tail);
+    }
+    if (info.size < tail.offset) {
+      this.#files.delete(path);
+      await this.#pump(path);
+      return;
+    }
+    if (!tail.accepted) {
+      tail.offset = info.size;
+      return;
+    }
+    if (!tail.bootstrapped) {
+      tail.bootstrapped = true;
+      const bootstrapBytes = this.options.bootstrapBytes ?? DEFAULT_BOOTSTRAP_BYTES;
+      if (info.size - tail.offset > bootstrapBytes) {
+        tail.offset = Math.max(tail.offset, info.size - bootstrapBytes);
+        tail.remainder = "";
+        tail.decoder = new StringDecoder("utf8");
+        await this.#read(path, info.size, tail, true);
+        return;
+      }
+    }
     if (info.size === tail.offset) return;
+    await this.#read(path, info.size, tail, false);
+  }
 
+  async #read(path: string, endOffset: number, tail: TailState, discardFirstPartialLine: boolean): Promise<void> {
     const handle = await open(path, "r");
     try {
-      const buffer = Buffer.alloc(Number(info.size - tail.offset));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, tail.offset);
-      tail.offset += bytesRead;
-      const lines = `${tail.remainder}${buffer.subarray(0, bytesRead).toString("utf8")}`.split("\n");
-      tail.remainder = lines.pop() ?? "";
-      for (const line of lines) this.#consume(line, tail);
+      let discarding = discardFirstPartialLine;
+      while (tail.offset < endOffset) {
+        const length = Math.min(READ_CHUNK_BYTES, endOffset - tail.offset);
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, tail.offset);
+        if (!bytesRead) break;
+        tail.offset += bytesRead;
+        let content = tail.decoder.write(buffer.subarray(0, bytesRead));
+        if (discarding) {
+          const newline = content.indexOf("\n");
+          if (newline < 0) continue;
+          content = content.slice(newline + 1);
+          discarding = false;
+        }
+        const lines = `${tail.remainder}${content}`.split("\n");
+        tail.remainder = lines.pop() ?? "";
+        for (const line of lines) this.#consume(line, tail);
+      }
     } finally {
       await handle.close();
     }
@@ -61,6 +126,8 @@ export class CodexJsonlObserver extends EventEmitter {
     try { record = JSON.parse(line) as JsonObject; } catch { return; }
     const payload = object(record.payload);
     if (text(record.type) === "session_meta") {
+      if (tail.metadataSeen) return;
+      tail.metadataSeen = true;
       const sessionId = text(payload.session_id) ?? text(payload.id);
       tail.accepted = text(payload.cwd) === this.options.cwd && (!this.#sessionId || sessionId === this.#sessionId);
       if (!tail.accepted) return;
@@ -109,23 +176,32 @@ export class CodexJsonlObserver extends EventEmitter {
         if (message) this.#emit({ type: "agent.message", threadId, message, at: text(record.timestamp) });
       } else if (payloadType === "token_count") {
         const usage = object(object(payload.info).total_token_usage);
-        this.#emit({ type: "tokens.updated", threadId, totalTokens: numeric(usage.total_tokens), outputTokens: numeric(usage.output_tokens) });
+        this.#emit({
+          type: "tokens.updated",
+          threadId,
+          totalTokens: numeric(usage.total_tokens),
+          inputTokens: numeric(usage.input_tokens),
+          outputTokens: numeric(usage.output_tokens),
+        });
       }
       return;
     }
     if (recordType !== "response_item") return;
-    if (payloadType === "custom_tool_call") {
+    if (payloadType === "custom_tool_call" || payloadType === "function_call") {
       const name = text(payload.name) ?? "tool";
-      const callId = text(payload.call_id);
-      if (callId) tail.calls.set(callId, name);
-      this.#emit({ type: "agent.activity", threadId, tool: name, status: "inProgress" });
+      const callId = text(payload.call_id) ?? text(payload.id);
+      const rawInput = text(payload.input) ?? text(payload.arguments);
+      const label = codexToolLabel(name, parseJsonValue(rawInput));
+      if (callId) tail.calls.set(callId, label);
+      this.#emit({ type: "agent.activity", threadId, itemId: callId, tool: label, status: "inProgress", at: text(record.timestamp) });
       if (name === "spawn_agent") {
-        const input = parseJson(text(payload.input));
+        const input = parseJson(rawInput);
         this.#pendingSpawns.push({ parentThreadId: threadId, taskName: text(input.task_name), prompt: text(input.message) });
       }
-    } else if (payloadType === "custom_tool_call_output") {
-      const name = tail.calls.get(text(payload.call_id) ?? "") ?? "tool";
-      this.#emit({ type: "agent.activity", threadId, tool: name, status: "completed" });
+    } else if (payloadType === "custom_tool_call_output" || payloadType === "function_call_output") {
+      const callId = text(payload.call_id);
+      const name = tail.calls.get(callId ?? "") ?? "tool";
+      this.#emit({ type: "agent.activity", threadId, itemId: callId, tool: name, status: "completed", at: text(record.timestamp) });
     }
   }
 
@@ -149,14 +225,10 @@ async function jsonlFiles(root: string): Promise<string[]> {
 async function latestRootSession(paths: string[], cwd: string): Promise<string | undefined> {
   let selected: { id: string; modifiedAt: number } | undefined;
   for (const path of paths) {
-    const handle = await open(path, "r").catch(() => undefined);
-    if (!handle) continue;
     try {
-      const buffer = Buffer.alloc(32_768);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n")[0];
-      if (!firstLine) continue;
-      const record = JSON.parse(firstLine) as JsonObject;
+      const header = await readSessionHeader(path);
+      if (!header) continue;
+      const record = JSON.parse(header.line) as JsonObject;
       const payload = object(record.payload);
       if (text(record.type) !== "session_meta" || text(payload.cwd) !== cwd || text(payload.parent_thread_id)) continue;
       const id = text(payload.session_id) ?? text(payload.id);
@@ -165,14 +237,47 @@ async function latestRootSession(paths: string[], cwd: string): Promise<string |
       if (!selected || modifiedAt > selected.modifiedAt) selected = { id, modifiedAt };
     } catch {
       // A partially-written or unrelated file is simply not a candidate.
-    } finally {
-      await handle.close();
     }
   }
   return selected?.id;
+}
+
+async function readSessionHeader(path: string): Promise<{ line: string; nextOffset: number } | undefined> {
+  const handle = await open(path, "r").catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    while (offset < MAX_SESSION_META_BYTES) {
+      const length = Math.min(SESSION_META_CHUNK_BYTES, MAX_SESSION_META_BYTES - offset);
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      if (!bytesRead) return undefined;
+      const chunk = buffer.subarray(0, bytesRead);
+      const newline = chunk.indexOf(0x0a);
+      if (newline >= 0) {
+        chunks.push(chunk.subarray(0, newline));
+        return { line: Buffer.concat(chunks).toString("utf8"), nextOffset: offset + newline + 1 };
+      }
+      chunks.push(chunk);
+      offset += bytesRead;
+    }
+    throw new Error(`Codex session metadata exceeds ${MAX_SESSION_META_BYTES} bytes in ${path}`);
+  } finally {
+    await handle.close();
+  }
 }
 
 function object(value: unknown): JsonObject { return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {}; }
 function text(value: unknown): string | undefined { return typeof value === "string" && value.length ? value : undefined; }
 function numeric(value: unknown): number | undefined { return typeof value === "number" ? value : undefined; }
 function parseJson(value?: string): JsonObject { try { return value ? object(JSON.parse(value)) : {}; } catch { return {}; } }
+function parseJsonValue(value?: string): unknown {
+  if (!value) return undefined;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+const DEFAULT_BOOTSTRAP_BYTES = 8 * 1024 * 1024;
+const READ_CHUNK_BYTES = 1024 * 1024;
+const SESSION_META_CHUNK_BYTES = 64 * 1024;
+const MAX_SESSION_META_BYTES = 4 * 1024 * 1024;

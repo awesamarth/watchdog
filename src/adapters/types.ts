@@ -20,6 +20,16 @@ export type AgentCapabilities = {
   modelOverride: Capability;
 };
 
+export type ExecutionTargetCapabilities = {
+  pause: Capability;
+  stop: Capability;
+  retry: Capability;
+};
+
+export type ExecutionCapabilities = ExecutionTargetCapabilities & {
+  nodes: Record<string, ExecutionTargetCapabilities>;
+};
+
 export type AdapterTarget = {
   threadId: string;
   parentThreadId?: string;

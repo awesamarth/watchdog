@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024" viewBox="0 0 1536 1024">
+  <image href="watchdog-devpost-thumbnail.png" x="0" y="0" width="1536" height="1024"/>
+  <linearGradient id="veil" x1="0" x2="1">
+    <stop offset="0" stop-color="#07100b" stop-opacity="0"/>
+    <stop offset="0.18" stop-color="#07100b" stop-opacity="0.48"/>
+    <stop offset="1" stop-color="#07100b" stop-opacity="0.9"/>
+  </linearGradient>
+  <rect x="650" y="0" width="886" height="1024" fill="url(#veil)"/>
+  <g transform="translate(730 470)" fill="#e9eee9" font-family="SF Mono, SFMono-Regular, Menlo, monospace">
+    <rect width="14" height="38" y="-102" fill="#75bf91"/>
+    <text x="38" y="-70" font-size="36" font-weight="700" letter-spacing="5.5" fill="#aab8af">KEEP YOUR AGENTS IN CHECK.</text>
+    <text x="0" y="110" font-size="168" font-weight="700" letter-spacing="-8">WATCHDOG</text>
+    <rect x="0" y="154" width="690" height="2" fill="#52675a"/>
+    <text x="0" y="230" font-size="30" font-weight="600" letter-spacing="1" fill="#bdc9c0">SUBAGENTS · LOOPS · EXECUTION GRAPHS</text>
+  </g>
+</svg>

@@ -36,6 +36,8 @@ describe("Watchdog MCP bridge", () => {
         action: "declare",
         executionId: "repair",
         objective: "Repair until verified",
+        verifier: "the regression suite passes",
+        maxIterations: 3,
         nodes: [
           { id: "patch", label: "PATCH", kind: "action" },
           { id: "verify", label: "VERIFY", kind: "verifier" },
@@ -48,6 +50,16 @@ describe("Watchdog MCP bridge", () => {
     });
 
     expect(result.isError).not.toBe(true);
+    const evidence = await client.callTool({
+      name: "watchdog_execution",
+      arguments: {
+        action: "evidence",
+        executionId: "repair",
+        nodeId: "verify",
+        summary: "Regression failure reproduced.",
+      },
+    });
+    expect(evidence.isError).not.toBe(true);
     expect(requests).toEqual([
       expect.objectContaining({
         action: "execution.declare",
@@ -55,9 +67,18 @@ describe("Watchdog MCP bridge", () => {
           id: "repair",
           ownerThreadId: "root",
           authority: "declared",
+          policy: { verifier: "the regression suite passes", maxIterations: 3 },
           nodes: [expect.objectContaining({ label: "PATCH" }), expect.objectContaining({ label: "VERIFY" })],
         }),
       }),
+      {
+        action: "execution.evidence",
+        executionId: "repair",
+        agent: "root",
+        nodeId: "verify",
+        summary: "Regression failure reproduced.",
+        source: "Codex MCP instrumentation",
+      },
     ]);
   });
 });

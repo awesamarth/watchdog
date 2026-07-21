@@ -36,12 +36,17 @@ const ExecutionInputSchema = z.object({
     "start_node",
     "complete_node",
     "select_edge",
+    "evidence",
+    "verify",
     "complete",
   ]),
   executionId: z.string().min(1).optional(),
   ownerAgent: z.string().min(1).optional(),
   label: z.string().optional(),
   objective: z.string().optional(),
+  verifier: z.string().optional(),
+  maxTokens: z.number().int().min(1).optional(),
+  maxIterations: z.number().int().min(1).optional(),
   parentExecutionId: z.string().optional(),
   parentNodeId: z.string().optional(),
   nodes: z.array(NodeSchema).min(1).optional(),
@@ -70,8 +75,10 @@ export function createWatchdogMcpServer(request: ControlRequester): McpServer {
         "Do not turn an ordinary one-shot task into a graph.",
         "Declare real semantic nodes before work starts, then report actual node starts, completions, and selected edges.",
         "A cycle is a loop. Use loop-back edges and increment the iteration only when another pass begins.",
+        "Declare verifier and token/iteration budgets when they are real, then record explicit evidence and verification outcomes instead of treating commentary as proof.",
         "Use a subgraph node plus matching parentExecutionId/parentNodeId for nested workflows.",
         "If internal stages are unknown, declare one honest opaque action node instead of inventing detail.",
+        "Before returning the final response, complete every started node and then complete the execution; never leave a terminal node running.",
       ].join(" "),
     },
   );
@@ -85,6 +92,7 @@ export function createWatchdogMcpServer(request: ControlRequester): McpServer {
         "This records semantic boundaries; it does not perform the work.",
         "Use action=list before declaring if the current run may already contain the graph.",
         "ownerAgent defaults to root and may be a Watchdog nickname or unique thread-id prefix.",
+        "Always close started nodes and the execution before the final response, including failure and stop paths.",
       ].join(" "),
       inputSchema: ExecutionInputSchema,
     },
@@ -126,6 +134,7 @@ async function executeMcpOperation(input: ExecutionInput, request: ControlReques
         ownerThreadId: input.ownerAgent ?? "root",
         label: input.label,
         objective: input.objective,
+        policy: executionPolicy(input),
         source: { kind: "watchdog", label: "Codex MCP instrumentation" },
         authority: "declared",
         parentExecutionId: input.parentExecutionId,
@@ -147,6 +156,7 @@ async function executeMcpOperation(input: ExecutionInput, request: ControlReques
       terminalNodeIds: input.terminalNodeIds,
       objective: input.objective,
       label: input.label,
+      policy: executionPolicy(input),
     });
   }
   if (input.action === "start_iteration") {
@@ -193,6 +203,27 @@ async function executeMcpOperation(input: ExecutionInput, request: ControlReques
       iteration: input.iteration,
     });
   }
+  if (input.action === "evidence") {
+    return await request({
+      action: "execution.evidence",
+      executionId,
+      agent: input.ownerAgent ?? "root",
+      nodeId: input.nodeId,
+      summary: required(input.summary, "evidence requires summary"),
+      source: "Codex MCP instrumentation",
+    });
+  }
+  if (input.action === "verify") {
+    if (input.status !== "passed" && input.status !== "failed") {
+      throw new Error("verify status must be passed or failed");
+    }
+    return await request({
+      action: "execution.verify",
+      executionId,
+      status: input.status,
+      summary: input.summary,
+    });
+  }
   const status = input.status;
   if (!status || !EXECUTION_END_STATUSES.includes(status as typeof EXECUTION_END_STATUSES[number])) {
     throw new Error("complete status must be completed, failed, stopped, or blocked");
@@ -228,4 +259,13 @@ function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : { result: value };
+}
+
+function executionPolicy(input: ExecutionInput) {
+  const policy = {
+    verifier: input.verifier?.trim() || undefined,
+    maxTokens: input.maxTokens,
+    maxIterations: input.maxIterations,
+  };
+  return Object.values(policy).some((value) => value !== undefined) ? policy : undefined;
 }

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { WatchdogEvent } from "../adapters/events.js";
+import { codexToolLabel } from "./activity.js";
 import { type CodexAppServerClient, type JsonObject } from "./protocol.js";
 
 export type { WatchdogEvent } from "../adapters/events.js";
@@ -53,7 +54,13 @@ export class CodexEventNormalizer extends EventEmitter {
     if (method === "thread/tokenUsage/updated") {
       const threadId = text(params.threadId);
       const total = object(object(params.tokenUsage).total);
-      if (threadId) this.emit("event", { type: "tokens.updated", threadId, totalTokens: numeric(total.totalTokens), outputTokens: numeric(total.outputTokens) } satisfies WatchdogEvent);
+      if (threadId) this.emit("event", {
+        type: "tokens.updated",
+        threadId,
+        totalTokens: numeric(total.totalTokens),
+        inputTokens: numeric(total.inputTokens),
+        outputTokens: numeric(total.outputTokens),
+      } satisfies WatchdogEvent);
       return;
     }
     if (method === "item/started" || method === "item/completed") this.#onItem(object(params.item), text(params.threadId), method === "item/completed" ? "completed" : "started");
@@ -70,7 +77,7 @@ export class CodexEventNormalizer extends EventEmitter {
     }
     const activity = itemActivity(item, lifecycle);
     if (parentThreadId && activity) {
-      this.emit("event", { type: "agent.activity", threadId: parentThreadId, ...activity } satisfies WatchdogEvent);
+      this.emit("event", { type: "agent.activity", threadId: parentThreadId, itemId, at: new Date().toISOString(), ...activity } satisfies WatchdogEvent);
     }
     if (text(item.type) === "subAgentActivity") {
       // In this protocol notification the enclosing thread is the child and
@@ -97,7 +104,7 @@ export class CodexEventNormalizer extends EventEmitter {
         }
       }
       if (senderThreadId && text(item.tool)) {
-        this.emit("event", { type: "agent.activity", threadId: senderThreadId, tool: text(item.tool)!, status: text(item.status) ?? "unknown", model: text(item.model), reasoningEffort: text(item.reasoningEffort) } satisfies WatchdogEvent);
+        this.emit("event", { type: "agent.activity", threadId: senderThreadId, itemId, tool: text(item.tool)!, status: text(item.status) ?? "unknown", at: new Date().toISOString(), model: text(item.model), reasoningEffort: text(item.reasoningEffort) } satisfies WatchdogEvent);
       }
     }
   }
@@ -216,10 +223,13 @@ function itemText(item: JsonObject): string | undefined {
 function itemActivity(item: JsonObject, lifecycle: "started" | "completed"): { tool: string; status: string } | undefined {
   const type = text(item.type);
   const status = text(item.status) ?? (lifecycle === "started" ? "inProgress" : "completed");
-  if (type === "commandExecution") return { tool: `command · ${truncate(text(item.command) ?? "shell")}`, status };
+  if (type === "commandExecution") return { tool: `command · ${truncate(text(item.command) ?? "shell", 320)}`, status };
   if (type === "fileChange") return { tool: `file change · ${array(item.changes).length || "?"} files`, status };
   if (type === "mcpToolCall") return { tool: `MCP · ${[text(item.server), text(item.tool)].filter(Boolean).join("/") || "tool"}`, status };
-  if (type === "dynamicToolCall") return { tool: [text(item.namespace), text(item.tool)].filter(Boolean).join("/") || "tool", status };
+  if (type === "dynamicToolCall") {
+    const tool = [text(item.namespace), text(item.tool)].filter(Boolean).join("/") || "tool";
+    return { tool: codexToolLabel(tool, item.arguments), status };
+  }
   if (type === "webSearch") return { tool: `web search · ${truncate(text(item.query) ?? "query")}`, status };
   if (type === "imageView") return { tool: `view image · ${truncate(text(item.path) ?? "image")}`, status };
   if (type === "imageGeneration") return { tool: "generate image", status };
@@ -228,4 +238,4 @@ function itemActivity(item: JsonObject, lifecycle: "started" | "completed"): { t
   if (type === "reasoning") return { tool: "reasoning", status };
   return undefined;
 }
-function truncate(value: string): string { return value.length > 90 ? `${value.slice(0, 87)}…` : value; }
+function truncate(value: string, length = 90): string { return value.length > length ? `${value.slice(0, length - 1)}…` : value; }

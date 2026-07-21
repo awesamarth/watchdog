@@ -12,10 +12,18 @@ export async function runDoctor(): Promise<void> {
 
   const codex = spawnSync("codex", ["--version"], { encoding: "utf8" });
   const codexVersion = (codex.stdout || codex.stderr).trim();
-  checks.push({ label: "Codex CLI", ok: codex.status === 0, required: true, detail: codex.status === 0 ? codexVersion : "not found on PATH" });
+  const codexAvailable = codex.status === 0;
+  checks.push({ label: "Codex CLI", ok: codexAvailable, detail: codexAvailable ? codexVersion : "not found on PATH (optional when using Pi only)" });
   const pi = spawnSync("pi", ["--version"], { encoding: "utf8" });
   const piVersion = (pi.stdout || pi.stderr).trim();
-  checks.push({ label: "Pi CLI", ok: pi.status === 0, detail: pi.status === 0 ? piVersion : "not found on PATH (optional unless using `watchdog pi`)" });
+  const piAvailable = pi.status === 0;
+  checks.push({ label: "Pi CLI", ok: piAvailable, detail: piAvailable ? piVersion : "not found on PATH (optional when using Codex only)" });
+  checks.push({
+    label: "Agent harness",
+    ok: codexAvailable || piAvailable,
+    required: true,
+    detail: codexAvailable || piAvailable ? [codexAvailable && "Codex", piAvailable && "Pi"].filter(Boolean).join(" + ") : "install Codex CLI or Pi",
+  });
 
   try {
     const assets = dashboardAssetsPath();
@@ -30,11 +38,11 @@ export async function runDoctor(): Promise<void> {
     const harnesses = [...new Set(active.map((run) => run.snapshot.adapter?.harness ?? run.snapshot.mode))].join(", ");
     checks.push({ label: "Project runtime", ok: true, detail: `${active.length} active · ${harnesses} · ${agents} agents` });
   } else {
-    checks.push({ label: "Project runtime", ok: true, detail: "inactive (expected until `watchdog codex`, `watchdog pi`, `observe`, or `demo` starts)" });
+    checks.push({ label: "Project runtime", ok: true, detail: "inactive (expected until `watchdog codex`, `watchdog pi`, or `watchdog observe` starts)" });
   }
 
   console.log("Watchdog doctor\n");
-  for (const check of checks) console.log(`${check.ok ? "✓" : "✗"} ${check.label.padEnd(18)} ${check.detail}`);
+  for (const check of checks) console.log(`${check.ok ? "✓" : check.required ? "✗" : "–"} ${check.label.padEnd(18)} ${check.detail}`);
   const failures = checks.filter((check) => check.required && !check.ok);
   if (failures.length) {
     process.exitCode = 1;

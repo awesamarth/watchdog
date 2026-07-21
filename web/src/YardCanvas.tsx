@@ -1,9 +1,9 @@
 import { useEffect, useRef, type MouseEvent } from "react";
 import { harnessDisplayName } from "./harness";
 import type { AgentState, ExecutionGraphState, RunSnapshot } from "./types";
-import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, executionStations, executionTrainTargetX } from "./yardMotion";
+import { childTrackSlots, childTrainScale, childTrainTargetX, childTrainTargetY, executionStations, executionTrainTargetX, partitionYardChildren } from "./yardMotion";
 
-type Hit = { x: number; y: number; w: number; h: number; type: "dog" | "agent" | "tower" | "execution"; id?: string };
+type Hit = { x: number; y: number; w: number; h: number; type: "dog" | "agent" | "tower" | "execution" | "node" | "dock"; id?: string };
 type Light = "day" | "night";
 
 const W = 1100;
@@ -18,12 +18,15 @@ export function yardViewport(width: number, height: number): { scale: number; x:
   };
 }
 
-export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpenExecution, light, petNonce, onPet }: {
+export function YardCanvas({ snapshot, selectedId, executionId, dockFocused = false, onSelect, onSelectNode, onOpenExecution, onOpenDock, light, petNonce, onPet }: {
   snapshot: RunSnapshot;
   selectedId?: string;
   executionId?: string;
+  dockFocused?: boolean;
   onSelect: (id: string) => void;
+  onSelectNode?: (nodeId: string) => void;
   onOpenExecution?: (id: string) => void;
+  onOpenDock?: () => void;
   light: Light;
   petNonce: number;
   onPet: () => void;
@@ -53,6 +56,7 @@ export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpen
     const tracks = load("/assets/track-atlas.png");
     const clouds = load("/assets/cloud-atlas.png");
     const smoke = load("/assets/smoke-sprites.png");
+    const dock = load("/assets/agent-dock-v1.png");
     let frame = 0;
 
     const render = (now: number) => {
@@ -73,11 +77,11 @@ export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpen
       frameAtRef.current = now;
       const petElapsed = petAtRef.current ? Math.max(0, (now - petAtRef.current) / 1000) : 99;
       const execution = executionId ? snapshot.executions.find((candidate) => candidate.id === executionId) : undefined;
-      hitsRef.current = drawYard(context, snapshot, selectedId, execution, light, (now - startRef.current) / 1000, petElapsed, dog, trains, backdrop, tower, tracks, clouds, smoke, motionRef.current, delta);
+      hitsRef.current = drawYard(context, snapshot, selectedId, execution, dockFocused, light, (now - startRef.current) / 1000, petElapsed, dog, trains, backdrop, tower, tracks, clouds, smoke, dock, motionRef.current, delta);
     };
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [snapshot, selectedId, executionId, light]);
+  }, [snapshot, selectedId, executionId, dockFocused, light]);
 
   const locateHit = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -93,7 +97,9 @@ export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpen
   }} onMouseLeave={(event) => { event.currentTarget.style.cursor = "default"; }} onClick={(event) => {
     const hit = locateHit(event);
     if (hit?.type === "dog") onPet();
+    else if (hit?.type === "dock") onOpenDock?.();
     else if (hit?.type === "execution" && hit.id) onOpenExecution?.(hit.id);
+    else if (hit?.type === "node" && hit.id) onSelectNode?.(hit.id);
     else if (hit?.type === "tower") {
       const execution = executionId ? snapshot.executions.find((candidate) => candidate.id === executionId) : undefined;
       const owner = snapshot.agents.find((agent) => agent.threadId === execution?.ownerThreadId)
@@ -104,7 +110,7 @@ export function YardCanvas({ snapshot, selectedId, executionId, onSelect, onOpen
   }} />;
 }
 
-function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selectedId: string | undefined, execution: ExecutionGraphState | undefined, light: Light, t: number, petT: number, dog: HTMLImageElement, trains: HTMLImageElement, backdrop: HTMLImageElement, tower: HTMLImageElement, tracks: HTMLImageElement, clouds: HTMLImageElement, smoke: HTMLImageElement, motion: Map<string, { x: number; y: number }>, delta: number): Hit[] {
+function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selectedId: string | undefined, execution: ExecutionGraphState | undefined, dockFocused: boolean, light: Light, t: number, petT: number, dog: HTMLImageElement, trains: HTMLImageElement, backdrop: HTMLImageElement, tower: HTMLImageElement, tracks: HTMLImageElement, clouds: HTMLImageElement, smoke: HTMLImageElement, dock: HTMLImageElement, motion: Map<string, { x: number; y: number }>, delta: number): Hit[] {
   const night = light === "night";
   ctx.fillStyle = night ? "#142b27" : "#547c48";
   ctx.fillRect(0, 0, W, H);
@@ -117,8 +123,9 @@ function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selected
   const children = primaryRoot
     ? snapshot.agents.filter((agent) => agent.parentThreadId === primaryRoot.threadId)
     : snapshot.agents.filter((agent) => agent.parentThreadId);
-  const placements = layoutChildren(children);
-  const carriageScale = childTrainScale(children.length);
+  const yardChildren = partitionYardChildren(children);
+  const placements = layoutChildren(yardChildren.visible);
+  const carriageScale = childTrainScale(yardChildren.visible.length);
   drawTracks(ctx, tracks, placements, night);
 
   const hits: Hit[] = [];
@@ -128,6 +135,11 @@ function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selected
   drawDog(ctx, dog, 104, dogY, t, snapshot, petT);
   drawHarnessSign(ctx, snapshot.adapter, night);
   hits.push({ x: 18, y: 34, w: 280, h: 305, type: "tower" }, { x: 98, y: 128, w: 104, h: 108, type: "dog" });
+  if (yardChildren.dockEnabled) {
+    const dockSelected = dockFocused || yardChildren.docked.some((agent) => agent.threadId === selectedId);
+    drawDock(ctx, dock, yardChildren.docked.length, night, dockSelected);
+    hits.push({ x: DOCK_X - 6, y: DOCK_Y - 6, w: DOCK_W + 12, h: DOCK_LABEL_Y + DOCK_LABEL_H - DOCK_Y + 6, type: "dock" });
+  }
 
   const roots = primaryRoot ? [primaryRoot] : [];
   roots.forEach((agent, index) => {
@@ -154,6 +166,41 @@ function drawYard(ctx: CanvasRenderingContext2D, snapshot: RunSnapshot, selected
 
   if (night) drawFireflies(ctx, t);
   return hits;
+}
+
+const DOCK_X = 32;
+const DOCK_Y = 476;
+const DOCK_W = 191;
+const DOCK_H = 152;
+const DOCK_LABEL_Y = 629;
+const DOCK_LABEL_H = 27;
+
+function drawDock(ctx: CanvasRenderingContext2D, image: HTMLImageElement, count: number, night: boolean, selected: boolean) {
+  if (selected) {
+    ctx.fillStyle = "#f2bf4f";
+    ctx.fillRect(DOCK_X - 4, DOCK_Y - 4, 48, 4);
+    ctx.fillRect(DOCK_X - 4, DOCK_Y - 4, 4, 38);
+    ctx.fillRect(DOCK_X + DOCK_W - 44, DOCK_Y - 4, 48, 4);
+    ctx.fillRect(DOCK_X + DOCK_W, DOCK_Y - 4, 4, 38);
+  }
+  if (image.complete && image.naturalWidth) {
+    ctx.save();
+    ctx.globalAlpha = night ? .82 : 1;
+    ctx.drawImage(image, DOCK_X, DOCK_Y, DOCK_W, DOCK_H);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = night ? "#1b2a24" : "#503920";
+    ctx.fillRect(DOCK_X + 18, DOCK_Y + 35, DOCK_W - 36, DOCK_H - 45);
+  }
+  ctx.fillStyle = "#111915";
+  ctx.fillRect(DOCK_X + 1, DOCK_LABEL_Y, DOCK_W - 2, DOCK_LABEL_H);
+  ctx.strokeStyle = count > 0 ? "#b59448" : "#35433b";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(DOCK_X + 2, DOCK_LABEL_Y + 1, DOCK_W - 4, DOCK_LABEL_H - 2);
+  ctx.fillStyle = count > 0 ? "#f3eedf" : "#89958d";
+  ctx.font = "700 11px ui-monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(count > 0 ? `DOCK · ${count}` : "DOCK · EMPTY", DOCK_X + DOCK_W / 2, DOCK_LABEL_Y + 18);
 }
 
 function drawHarnessSign(ctx: CanvasRenderingContext2D, adapter: RunSnapshot["adapter"], night: boolean) {
@@ -276,7 +323,7 @@ function drawStations(ctx: CanvasRenderingContext2D, execution: ExecutionGraphSt
       ctx.lineWidth = 2;
       ctx.strokeRect(station.x + width / 2 - 14, 329, 7, 7);
       hits.push({ x: station.x - width / 2, y: 292, w: width, h: 56, type: "execution", id: station.subgraphId });
-    }
+    } else hits.push({ x: station.x - width / 2, y: 292, w: width, h: 56, type: "node", id: station.id });
   });
   return hits;
 }
@@ -387,7 +434,15 @@ function drawTrain(ctx: CanvasRenderingContext2D, image: HTMLImageElement, smoke
   }
   ctx.restore();
   const nameplateX = flip ? -24 : 0;
-  ctx.fillStyle="#111915"; ctx.fillRect(-48 + nameplateX,38,120,25); ctx.fillStyle="#f3eedf"; ctx.font="700 12px ui-monospace"; ctx.textAlign="center"; ctx.fillText(agent.nickname??(agent.parentThreadId?agent.threadId.slice(0,8):"ROOT"),12 + nameplateX,55);
+  const stopped = agent.status === "stopped";
+  ctx.fillStyle=stopped?"#2a1413":"#111915"; ctx.fillRect(-48 + nameplateX,38,120,25);
+  if (stopped) {
+    ctx.strokeStyle="#c65c51"; ctx.lineWidth=2; ctx.strokeRect(-47 + nameplateX,39,118,23);
+    ctx.fillStyle="#c65c51"; ctx.fillRect(55 + nameplateX,-40,14,14);
+    ctx.fillStyle="#2a1413"; ctx.fillRect(58 + nameplateX,-37,8,8);
+    ctx.fillStyle="#c65c51"; ctx.fillRect(60 + nameplateX,-35,4,4);
+  }
+  ctx.fillStyle=stopped?"#efaaa4":"#f3eedf"; ctx.font="700 12px ui-monospace"; ctx.textAlign="center"; ctx.fillText(agent.nickname??(agent.parentThreadId?agent.threadId.slice(0,8):"ROOT"),12 + nameplateX,55);
   ctx.restore();
 }
 

@@ -1,8 +1,11 @@
 {
-  "name": "watchdog-agent-control",
-  "version": "0.0.1",
-  "private": true,
-  "description": "Local operator control plane for agentic loops and subagents.",
+  "name": "@awesamarth/watchdog",
+  "version": "0.1.1",
+  "description": "Control subagents, agentic loops, and execution graphs from one local command center.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/awesamarth/watchdog.git"
@@ -39,7 +42,6 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "dashboard": "bun run web:build && tsx src/cli.ts dashboard",
-    "demo": "bun run web:build && tsx src/cli.ts demo",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "build": "bun run web:build && tsup",
@@ -54,6 +56,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ink": "^7.1.0",
     "react": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "sirv": "^3.0.2",
     "typebox": "1.1.38",
     "ws": "^8.18.1",

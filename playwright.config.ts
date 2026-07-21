@@ -9,11 +9,8 @@ export default defineConfig({
     colorScheme: "dark",
   },
   webServer: {
-    command: "bun run web:build && tsx src/demo/playwright.ts",
+    command: "bun run web:build && vite preview --config web/vite.config.ts --host 127.0.0.1 --port 4244 --strictPort",
     url: "http://127.0.0.1:4244",
     reuseExistingServer: true,
-    env: {
-      WATCHDOG_HOME: "./test-results/watchdog-home",
-    },
   },
 });

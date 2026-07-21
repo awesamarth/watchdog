@@ -178,11 +178,11 @@ describe("PiWorkerManager", () => {
         { name: "Scout", role: "investigator", task: "inspect A", model: "test/test-model", thinking: "medium" },
         { name: "Verifier", role: "verifier", task: "inspect B" },
       ],
-    }) as { agents: Array<{ name: string; status: string; totalTokens: number }> };
+    }) as { agents: Array<{ name: string; status: string; totalTokens: number; inputTokens: number; outputTokens: number }> };
 
     expect(result.agents).toEqual([
-      expect.objectContaining({ name: "Scout", status: "idle", totalTokens: 15 }),
-      expect.objectContaining({ name: "Verifier", status: "idle", totalTokens: 15 }),
+      expect.objectContaining({ name: "Scout", status: "idle", totalTokens: 15, inputTokens: 10, outputTokens: 5 }),
+      expect.objectContaining({ name: "Verifier", status: "idle", totalTokens: 15, inputTokens: 10, outputTokens: 5 }),
     ]);
     expect(events).toContainEqual(expect.objectContaining({
       type: "agent.requestedConfig",
@@ -240,6 +240,8 @@ describe("PiWorkerManager", () => {
       status: "idle",
       latestMessage: "done: inspect after slow work",
       totalTokens: 30,
+      inputTokens: 20,
+      outputTokens: 10,
     });
     expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
     await manager.close();

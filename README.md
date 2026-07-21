@@ -1,201 +1,361 @@
 # Watchdog
 
-Local operator control plane for subagents, agentic loops, and execution graphs
+**Control subagents, agentic loops, and execution graphs from one local command center.**
 
-## What it does
+[![npm](https://img.shields.io/npm/v/%40awesamarth%2Fwatchdog?color=f2bf4f)](https://www.npmjs.com/package/@awesamarth/watchdog)
+[![license](https://img.shields.io/npm/l/%40awesamarth%2Fwatchdog)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-77c86f)](https://nodejs.org/)
 
-`watchdog codex` starts a private local Codex App Server, launches the ordinary Codex terminal UI through its `--remote` option, and attaches a second local Watchdog client to the same runtime.
+Watchdog gives you one live view of what your coding agents are doing, what they cost, how they relate to each other, and which controls the active harness can actually perform.
 
-It is not a container and it does not replace Codex. Your normal Codex auth, config, working directory, terminal I/O, and tools remain in use.
+It works with the real Codex and Pi terminal interfaces. It does not replace either harness, put your agents in containers, or send their state to a hosted service.
 
-`watchdog pi` launches the ordinary Pi TUI with Watchdog's extension loaded. The same extension can also be loaded directly into an existing Pi workflow. Because Pi does not currently provide native subagents, Watchdog adds persistent Pi RPC workers with stable identities, permissioned nested delegation, live messages/tool activity, per-worker model/thinking/tool/cwd configuration, token and dollar-cost rollups, and real steer/follow-up/stop/retry controls. Pi remains the harness; Watchdog supplies the missing worker and control layer.
+## Why Watchdog
 
-Watchdog keeps live normalized state in memory, gives every launch a unique run ID and private local control socket, and saves an append-only JSONL trace under `.watchdog/runs/`. Active runs register under `~/.watchdog/registry/`, so Codex and Pi sessions—even in the same project—remain independently addressable. It tracks recursive topology, activity and turn transitions, live and completed messages, requested versus effective model/reasoning configuration, tokens/cost, explicit execution nodes/edges/activations, loop objective/iteration/verifier/evidence/budgets, and capability-aware controls.
+Subagents make parallel work possible, but they also make it easy to lose track of:
+
+- who spawned whom;
+- what each agent is currently reading, running, or saying;
+- which model and reasoning effort it actually received;
+- how many tokens and dollars the run is consuming;
+- whether work is duplicated, stalled, blocked, or looping;
+- and whether an agent, node, or execution can be safely stopped or retried.
+
+Watchdog normalizes those details across harnesses and exposes them through three local surfaces:
+
+- **Yard:** a live pixel-art overview of roots, subagents, loops, and graph stages.
+- **Operator:** exact topology, messages, tool activity, configuration, usage, warnings, graph edges, and controls.
+- **TUI:** a keyboard-first inspector and control surface for staying entirely in the terminal.
 
 ## How Codex and GPT-5.6 were used
 
-Watchdog was designed, built, debugged, and validated in the Codex CLI with GPT-5.6. Codex was the only AI coding agent used during development—and, because Watchdog integrates with Codex, it served as both the development collaborator and the live system under test.
+Watchdog was designed, implemented, debugged, and validated through the Codex CLI with GPT-5.6, primarily GPT-5.6 Sol at extra-high reasoning effort. All product-development assistance came from Codex and GPT-5.6. Pi was used as a target harness for cross-harness integration rehearsals, not as a separate implementation assistant.
 
-- **Product and architecture:** Codex helped turn the initial subagent-observability idea into a local-first control plane spanning subagents, agent loops, and execution graphs, then pressure-tested the scope and capability boundaries.
-- **Implementation:** GPT-5.6 worked across the TypeScript runtime, Codex App Server adapter, normalized event model, control sockets, CLI, Ink TUI, React/Vite dashboard, tests, and documentation.
-- **Codex integration research:** Codex inspected and exercised its own public runtime surfaces to map thread topology, streamed activity, requested-versus-effective model and reasoning configuration, token usage, and the controls actually available for roots and native children.
-- **Live validation:** Development sessions spawned real native Codex subagents, inspected their activity through Watchdog, interrupted them from a separate control surface, and verified automatic parent notification. Those rehearsals exposed timeout and nested-parent reporting gaps that were fixed and covered by tests.
-- **Continuous dogfooding:** Watchdog is developed through `watchdog codex`, so new observability and intervention features are tested against the same workflow they are intended to improve.
+- **Product shaping:** Codex helped turn an initial subagent-observability idea into a capability-aware control plane spanning subagents, loops, and execution graphs. It also challenged the boundary between Watchdog and existing harnesses so the project did not become another agent harness.
+- **Architecture:** GPT-5.6 designed the normalized event and capability contracts, per-run socket/registry model, Codex App Server integration, Pi extension and RPC-worker model, trace replay, and shared browser/TUI state.
+- **Implementation:** Codex worked across the TypeScript CLI/runtime, MCP integration, Pi extension, Ink TUI, React/Vite dashboard, pixel Yard, tests, package configuration, and user documentation.
+- **Integration research:** Codex inspected and exercised real Codex runtime surfaces to distinguish public capabilities from inferred behavior, including child topology, streamed activity, requested-versus-effective model configuration, token usage, and root/child control boundaries.
+- **Live validation:** Real Codex sessions spawned native children that Watchdog observed and interrupted. Real Pi sessions spawned persistent and nested workers, exercised steering, stopping, retry, model/thinking overrides, scoped delegation, and execution instrumentation.
+- **Bug discovery through dogfooding:** Watchdog was repeatedly developed through `watchdog codex`. Those runs exposed renderer corruption from terminal logging, unbounded control waits, incorrect nested-parent notification claims, opaque child assignments, requested/effective model mismatches, runaway Pi delegation, and worker-owned graphs hiding sibling agents. Each finding changed the implementation and received focused regression coverage.
 
-## Quick start from source
+Codex therefore served both as the development collaborator and as one of the live systems under test. The resulting architecture, focused regression tests, and commit history preserve evidence of that process.
 
-```bash
-bun install
-bun run dev -- codex
-```
+## Supported harnesses
 
-Or launch Pi through the same control plane:
+| Harness | Integration | What Watchdog can do |
+| --- | --- | --- |
+| **Codex CLI** | Watchdog-owned Codex App Server plus a run-scoped MCP metadata tool | Observe roots and native children, stream messages and commands, compare requested/effective configuration, track tokens, instrument graphs, and use the controls Codex exposes |
+| **Pi** | Native Pi extension plus persistent Pi RPC workers | Add first-class subagents, nested delegation, messages/tools, tokens and provider cost, graph instrumentation, steer, follow-up, stop, retry, and model/thinking overrides |
+| **Ordinary Codex session** | Read-only persisted JSONL observer | Reconstruct near-live topology, tasks, activity, messages, configuration, and token usage without owning the process |
+| **Historical trace** | Streaming replay | Reopen completed runs in the same dashboard and TUI with every mutation control disabled |
 
-```bash
-bun run dev -- pi
-```
+Watchdog is capability-aware. A button appears only when the selected harness and agent can truthfully perform that action.
 
-Both launchers forward normal harness arguments:
+## Requirements
 
-```bash
-bun run dev -- codex --model gpt-5.6-terra
-bun run dev -- pi --model openai-codex/gpt-5.6-luna --thinking low
-```
+- Node.js 22 or newer
+- Codex CLI and/or Pi already installed and authenticated
+- macOS or Linux for the local Unix-socket control plane
 
-For a temporary direct Pi integration without the launcher:
+## Install for Codex
 
-```bash
-pi --extension ./src/pi/extension.ts
-```
-
-The npm package is not published yet. Its manifest and production build already expose `dist/pi-extension.js` as a Pi extension, but do not install or publish the current package as if it were a released artifact.
-
-Start the browser dashboard in a second terminal:
+Install the package globally:
 
 ```bash
-bun run dashboard
+npm install -g @awesamarth/watchdog
 ```
 
-The command opens `http://127.0.0.1:4242` automatically. If a Watchdog dashboard already owns that port, it reuses and opens the existing instance; it never mistakes an unrelated local service for Watchdog. The browser receives pushed state over a local WebSocket and can switch among every active live run from its session picker. The selected harness is explicit in both Yard and Operator (`WATCHING CODEX` or `WATCHING PI`). The root page never mixes in simulations; without a live run, it reports that there are no running sessions and links to the read-only demo at `http://127.0.0.1:4242/demo`.
-
-For a deterministic, interactive rehearsal with warnings and working controls:
+From your real project directory, launch the normal Codex terminal UI through Watchdog:
 
 ```bash
-bun run demo
+watchdog codex
 ```
 
-This starts and opens an explicitly labeled simulation at `/demo` with working rehearsal controls; it never appears as a live session on `/` or pretends that mock activity came from Codex. The corresponding real-harness intervention checks are documented under Verification below.
+Watchdog preserves your Codex authentication, configuration, working directory, tools, permissions, and terminal experience. It does not modify `~/.codex/config.toml`.
 
-The dashboard has two modes:
-
-- **Yard:** an animated pixel-art rail yard where an ordinary task runs from `START` to `END`, while an instrumented workflow uses its real semantic node names as stations. Cycles are loops; subgraph stations open a nested Yard with breadcrumbs. The root is a right-facing locomotive, and every subagent gets a labeled branch car on a perpendicular spur. Children alternate above/below the main line, remain parked away while working, and move toward it when complete; crowded sidings scale the cars down without imposing a fixed agent limit. Click the full-body German shepherd to pet him; click a train to inspect that exact agent's assignment, current activity, live response, timestamped message history, execution node, model/effort, and tokens.
-- **Operator:** the same state as exact semantic nodes/edges plus the recursive subagent topology, activity table, configuration comparison, token/cost rollup, and capability-aware controls.
-
-Use the sun/moon button to inspect the day and night palettes. Controls follow the selected adapter rather than a hard-coded UI: active Codex native children are stop-only, while Watchdog Pi workers can be steered, followed up, stopped, and retried with model/thinking overrides.
-
-Forward a normal Codex prompt or options after `codex`:
+Normal Codex arguments and prompts pass through unchanged:
 
 ```bash
-bun run dev -- codex "Spawn exactly two subagents: one to map the project, one to identify risks. Do not edit files; return their findings."
+watchdog codex --model gpt-5.6-terra
+watchdog codex "Use two subagents to inspect this repository and report their findings."
 ```
 
-The terminal remains Codex. Once its UI starts, Watchdog does not render live status, socket, or event-log output into that terminal, so nothing competes with Codex's full-screen renderer. Use the dashboard, TUI, or second-terminal commands to inspect the run. Normalized events still go to the saved JSONL trace and control surfaces; App Server diagnostics go to the adjacent `.diagnostics.log`. Press `Ctrl+C` to stop the session; Watchdog forwards the signal and stops its local runtime.
+Open the browser dashboard from a second terminal:
 
-The Watchdog-owned Codex App Server also receives a run-scoped local MCP tool named `watchdog_execution`. It lets Codex declare and update real workflow nodes, edges, iterations, and nested subgraphs without shelling out or modifying `~/.codex/config.toml`. Only that metadata tool is enabled and pre-approved; it cannot edit files or control agents. Its instructions explicitly keep ordinary one-shot turns out of the execution-graph model and require honest opaque nodes when Codex does not know the internal stages.
+```bash
+watchdog dashboard
+```
 
-### Pi commands and subagents
+Or stay in the terminal:
 
-When the extension is active, Pi's native footer shows:
+```bash
+watchdog tui
+```
+
+## Install for Pi
+
+Install the same npm package as a Pi extension:
+
+```bash
+pi install npm:@awesamarth/watchdog
+pi
+```
+
+Ordinary future Pi sessions will load Watchdog automatically. The native footer reports the active worker count:
 
 ```text
 watchdog: active · 2/3 subagents
 ```
 
-The extension adds:
+The extension adds these commands:
 
 ```text
 /watchdog-start    start or restart the local Watchdog runtime
-/watchdog-stop     stop Watchdog and its Pi workers, not Pi
-/watchdog-status   show run and worker counts
-/watchdog-agents   list workers and current activity
-/watchdog-open     start/open the browser dashboard
+/watchdog-stop     stop Watchdog and its workers, not Pi
+/watchdog-status   show the run and worker counts
+/watchdog-agents   list workers and their current activity
+/watchdog-open     start or open the browser dashboard
 ```
 
-The model receives a `subagent` tool for spawning and controlling persistent workers. If another extension already owns that name, Watchdog deliberately avoids overriding it and registers `watchdog_subagent` instead. It also receives `watchdog_execution`, an instrumentation tool for declaring real workflow nodes and edges, marking node attempts and transitions, and nesting a child execution under a subgraph node. Its guidance explicitly keeps ordinary turns out of the graph model and forbids guessing hidden phases.
+It also gives Pi a `subagent` tool for persistent workers and a `watchdog_execution` tool for loops and execution graphs. If another extension already owns `subagent`, Watchdog leaves it untouched and registers `watchdog_subagent` instead.
 
-Nested delegation is default-deny. Every spawned worker gets a scoped opaque credential so it can instrument its own nested execution; that credential does not grant permission to spawn or control subagents. The `subagent` tool is exposed to a worker only when its task explicitly sets `allowDelegation: true`; its lifetime `maxChildren` and descendant `maxDepth` budgets both default to 1. Non-delegating workers cannot spawn children, and a delegating worker can list or control only its own subtree. The coordinator derives worker identity from that credential instead of trusting a caller-supplied parent ID. Global worker, concurrency, and depth limits default to 12, 4, and 3 and remain the final safety net; they can be overridden with `WATCHDOG_PI_MAX_WORKERS`, `WATCHDOG_PI_MAX_CONCURRENT`, and `WATCHDOG_PI_MAX_DEPTH`.
+Pi users who also want the standalone `watchdog` CLI and TUI can install the package globally with npm. `watchdog pi` is an optional one-run convenience launcher; it never acts as a hidden installer.
 
-Pi worker operations include parallel spawn, list, steer, follow-up, stop, and retry. An active-worker follow-up joins Pi's native follow-up queue; an idle-worker follow-up starts a context-preserving new turn instead of leaving a dormant queue. A retry reuses the stable worker identity, starts a fresh Pi session, and can change the effective model and thinking level. The interactive Pi root supports observation, steer, follow-up, and stop; Watchdog does not advertise root retry because Pi's extension API does not expose a truthful retry primitive for it.
+### Pi delegation safety
 
-Check demo-day prerequisites without changing anything:
+Nested delegation is default-deny. A worker receives the subagent tool only when its spawn request explicitly enables delegation. Child and depth budgets default to one, workers can control only their own subtree, and scoped instrumentation credentials never grant delegation rights.
+
+Global safety limits default to 12 workers, four concurrent model runs, and depth three. They can be adjusted when necessary:
 
 ```bash
-bun run dev -- doctor
+WATCHDOG_PI_MAX_WORKERS=8 WATCHDOG_PI_MAX_CONCURRENT=3 pi
 ```
 
-In a second terminal in the same project, inspect the live run without leaving the CLI:
+## Using the dashboard
+
+`watchdog dashboard` opens `http://127.0.0.1:4242` and reuses an existing Watchdog dashboard when one already owns that port.
+
+### Yard
+
+An ordinary task renders honestly as `START → END`. Every direct subagent gets a labeled carriage on a perpendicular siding. Working cars remain out on their branches; completed cars return toward the main rail and older completed agents move into the Dock when the Yard becomes crowded.
+
+Click a train to inspect its assignment, transcript, commands, model and reasoning configuration, tokens, cost, and available controls. Click the German shepherd to pet him.
+
+### Operator
+
+Operator separates two structures that agent interfaces often blur together:
+
+- the **subagent topology**, which records who spawned whom;
+- the **execution graph**, which records stages, dependencies, branches, joins, subgraphs, verifiers, and loop-back edges.
+
+Node cards expose attempt history, correlated agent activity, traversed edges, evidence, budgets, warnings, and capability-derived controls.
+
+### Multiple sessions
+
+Codex and Pi runs remain independent even when they use the same project directory. Switch between them from the dashboard session picker or target a run explicitly:
 
 ```bash
-bun run dev -- runs
-bun run dev -- ps
-bun run dev -- tree
-bun run dev -- inspect <agent-name>
+watchdog runs
+watchdog tree --run <run-id-prefix>
+watchdog tui --run <run-id-prefix>
+```
+
+## Using the terminal controls
+
+Inspect a live run:
+
+```bash
+watchdog ps
+watchdog tree
+watchdog inspect <agent-name>
+watchdog tui
+```
+
+Control an agent when its adapter supports the action:
+
+```bash
+watchdog steer <agent-name> "Focus on the failing verifier."
+watchdog follow-up <agent-name> "Now check the edge case."
+watchdog stop <agent-name>
+watchdog retry <agent-name> --model <model> --effort low "Retry with the retained evidence."
+```
+
+Current capability boundaries:
+
+| Target | Observe | Steer | Follow-up | Stop | Retry/model override |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Codex root | Yes | Yes | No | Yes | Yes |
+| Native Codex child | Yes | No | No | Yes | No |
+| Pi root | Yes | Yes | Yes | Yes | No |
+| Pi worker | Yes | Yes | Yes | Yes | Yes |
+| Observed/replayed run | Yes | No | No | No | No |
+
+These are runtime capabilities, not promises Watchdog fakes around. For example, stopping a whole execution is offered only when every affected live agent is actually interruptible.
+
+## CLI reference
+
+### Launch, inspect, and navigate
+
+| Command | Purpose |
+| --- | --- |
+| `watchdog codex [args]` | Launch the normal Codex TUI with live Watchdog integration |
+| `watchdog pi [args]` | Launch Pi with Watchdog loaded for this invocation |
+| `watchdog dashboard [--port <port>]` | Start or reuse the local browser dashboard and open it |
+| `watchdog tui [--run <id>]` | Open the terminal inspector and control surface |
+| `watchdog doctor` | Diagnose Node, Codex/Pi availability, dashboard assets, and the current project runtime |
+| `watchdog runs` | List reachable live and replay runs for the current project |
+| `watchdog ps [--run <id>]` | Show a compact agent/process list |
+| `watchdog tree [--run <id>]` | Print the recursive subagent topology |
+| `watchdog inspect <agent> [--run <id>]` | Print the normalized state for one agent |
+| `watchdog observe [--once] [--session <id>]` | Follow or reconstruct an ordinary Codex JSONL session read-only |
+| `watchdog traces [--all]` | List saved Watchdog traces |
+| `watchdog replay [latest\|trace.jsonl]` | Stream a saved trace back into the read-only dashboard/TUI model |
+
+### Agent controls
+
+| Command | Purpose |
+| --- | --- |
+| `watchdog steer <agent> <message> [--run <id>]` | Add guidance to an active steerable turn |
+| `watchdog follow-up <agent> <message> [--run <id>]` | Queue or start a context-preserving follow-up |
+| `watchdog stop <agent> [--run <id>]` | Interrupt an agent when its harness permits it |
+| `watchdog retry <agent> [--model <model>] [--effort <effort>] <message>` | Retry from retained context with optional supported overrides |
+
+### Loops and execution graphs
+
+| Command | Purpose |
+| --- | --- |
+| `watchdog loop set <agent> [options]` | Attach compatibility-loop policy to an agent or existing execution |
+| `watchdog loop evidence <agent> <summary>` | Record evidence for the current iteration |
+| `watchdog loop verify <agent> <pass\|fail> [summary]` | Record the verifier result |
+| `watchdog execution declare <graph.json>` | Declare a named graph definition and run |
+| `watchdog execution update <execution> <patch.json>` | Update execution policy or metadata |
+| `watchdog execution start <execution> <node> [options]` | Start a concrete node attempt |
+| `watchdog execution finish-node <execution> <node> <activation> <pass\|fail\|stop>` | Finish one node attempt honestly |
+| `watchdog execution edge <execution> <edge> [options]` | Record a selected edge traversal |
+| `watchdog execution evidence <execution> <summary> [options]` | Attach evidence to an execution or node |
+| `watchdog execution verify <execution> <pass\|fail> [summary]` | Record execution verification |
+| `watchdog execution stop <execution> [--node <node>] [reason]` | Stop a controllable node, subgraph, or execution |
+| `watchdog execution retry-node <execution> <node> [options] <message>` | Retry one retained, retry-capable node context |
+| `watchdog execution finish <execution> <complete\|fail\|stop\|block>` | Finish the execution with an explicit outcome |
+
+Run `watchdog --help` for every option. Commands that target a registered run accept `--run <id-or-unique-prefix>` as shown in the built-in help.
+
+## Loops and execution graphs
+
+Watchdog does not assume that every task is a loop.
+
+When Codex or Pi calls `watchdog_execution`, the Yard uses the declared node names as stations and Operator shows the exact directed edges. A loop is a graph containing a traversed loop-back edge. A subgraph station opens its nested execution with a breadcrumb back to the parent Yard.
+
+Instrumentation can record:
+
+- named nodes and typed edges;
+- concurrent node attempts and assigned agents;
+- iterations and loop-back traversals;
+- verifier policy and results;
+- evidence and token/iteration budgets;
+- nested executions;
+- completed, failed, stopped, blocked, or incomplete outcomes.
+
+Without authoritative instrumentation, Watchdog keeps the task opaque instead of guessing hidden stages.
+
+For scripts and custom orchestrators, the CLI exposes the same execution model:
+
+```bash
+watchdog execution declare ./workflow.json
+watchdog execution start release-checks audit --agent root --iteration 1
+watchdog execution edge release-checks audit-to-test --iteration 1
+watchdog execution evidence release-checks "Audit independently confirmed" --node audit
+watchdog execution verify release-checks pass "Exit criterion satisfied"
+watchdog execution finish release-checks complete
+```
+
+Run `watchdog --help` for the complete execution and compatibility-loop command reference.
+
+## Observe an existing Codex session
+
+If Codex was not launched through Watchdog, follow its persisted session JSONL in read-only mode:
+
+```bash
+watchdog observe
+watchdog dashboard
+```
+
+The observer hydrates a bounded recent tail and then follows new records every 500 ms. It can reconstruct persisted topology, tasks, activity, messages, model/effort context, and token usage, but it cannot steer or interrupt the external process.
+
+Use `watchdog observe --once` to reconstruct the latest matching session and exit.
+
+## Reopen a completed run
+
+Every owned or observed run writes an append-only trace under `.watchdog/runs/`.
+
+```bash
+watchdog traces
+watchdog replay latest
+```
+
+While replay remains active, open `watchdog dashboard` or target the printed run ID with `watchdog tui --run <id>`. Replay streams from disk, preserves the recorded topology and execution state, and remains strictly read-only.
+
+## Local-first by design
+
+- Runtime state remains in memory.
+- Controls travel over private per-run Unix sockets under `/tmp/watchdog-<uid>/`.
+- Active-run registrations live under `~/.watchdog/registry/`.
+- Append-only traces live inside the current project at `.watchdog/runs/`.
+- The dashboard binds to `127.0.0.1` by default.
+- Watchdog does not require an account, hosted backend, or telemetry service.
+
+Your harness provider still receives whatever the underlying Codex or Pi session normally sends to it. Watchdog does not add a separate cloud data path.
+
+## Develop locally
+
+This section is for contributors. Users installing from npm do not need Bun or the source checkout.
+
+```bash
+git clone https://github.com/awesamarth/watchdog.git
+cd watchdog
+bun install
+bun run dev -- codex
+```
+
+Launch other development surfaces:
+
+```bash
+bun run dev -- pi
+bun run dashboard
 bun run dev -- tui
 ```
 
-When exactly one run is active in the current project, the other commands select it automatically. If several runs match, select one explicitly with `--run <id-or-unique-prefix>`:
+Load the source extension directly into Pi:
 
 ```bash
-bun run dev -- tree --run codex-mh2
-bun run dev -- stop Cicero --run codex-mh2
-bun run dev -- follow-up Reuser "Now verify the edge case" --run pi-mh2
-bun run dev -- tui --run codex-mh2
+pi --extension ./src/pi/extension.ts
 ```
 
-`watchdog tui` is a small keyboard-first control surface with pane-aware navigation. The Run Tree is focused first, where arrows or `j/k` select an agent. `Tab` or `→` focuses the Inspector, where those keys scroll one line and Page Up/Down scroll half a viewport; `Tab`, `←`, or Escape returns to the tree. Home/End jump within the focused pane and `q` quits. The footer lists only controls the selected agent actually supports, with explicit labels such as `s steer`, `f follow-up`, `x stop`, and `r retry`. Native Codex v2 subagents therefore show only `x stop` while active; Pi RPC workers expose the controls their persistent process can actually perform.
-
-Declare loop intent and proof explicitly from either the CLI or dashboard:
+Or build and install the checkout into future Pi sessions:
 
 ```bash
-bun run dev -- loop set root --verifier "all tests pass three times" --token-budget 120000 --max-iterations 5
-bun run dev -- loop evidence root "Regression suite passed on the candidate fix"
-bun run dev -- loop verify root pass "Exit criterion satisfied"
+bun run build
+pi install .
 ```
 
-The legacy `loop` commands remain compatible because they still carry loop-policy information that graph traversal alone does not: verifier state, evidence, token budget, and iteration budget. They render an honest `ATTEMPT → VERIFY → DONE` cycle; Watchdog does not pretend to know the hidden body of the attempt. Rich workflows use the execution model instead. Codex and Pi can instrument that model directly with `watchdog_execution`; scripts and adapters can use the same control plane:
+Use `pi install . -l` for a project-local extension installation.
 
-```bash
-bun run dev -- execution declare ./workflow.json
-bun run dev -- execution start release-checks audit --agent root --activation audit-1 --iteration 1
-bun run dev -- execution finish-node release-checks audit audit-1 pass "Audit complete"
-bun run dev -- execution edge release-checks audit-to-test --iteration 1
-```
-
-`workflow.json` contains a stable execution id, `ownerThreadId` (usually `root`), named nodes, directed edges, entry nodes, and terminal nodes. An edge marked `loop-back` is a loop. A node with `kind: "subgraph"` and `subgraphId` links to another declared execution; the child execution carries the matching `parentExecutionId` and `parentNodeId`. Old traces without `executions` still load as ordinary tasks or legacy loops rather than being assigned invented stations.
-
-Watchdog can also follow an ordinary Codex CLI session through its persisted JSONL when it did not launch that session:
-
-```bash
-bun run dev -- observe
-# or reconstruct once and exit
-bun run dev -- observe --once
-```
-
-This fallback is near-live and deliberately read-only. It reconstructs session/child topology, activity, model/effort context, token use, objectives, and evidence from fields Codex persists, but it cannot reliably steer or stop that external process. Relaunch through `watchdog codex` for full controls.
-
-To prove the first subagent path after a run, inspect the latest trace:
-
-```bash
-latest=$(ls -t .watchdog/runs/*.jsonl | head -1)
-rg 'agent.spawned|tokens.updated' "$latest"
-```
-
-You should see one `agent.spawned` edge per child, including Codex-assigned names when available, plus per-thread token updates.
-
-## Verification
+### Verify a change
 
 ```bash
 bun run check
 bun run test
 bun run test:web
 bun run build
+bun pm pack --dry-run
 ```
 
-The unit suite covers normalized execution graphs and cycles, legacy loop compatibility, nested topology, adapter capability gates, Pi JSONL RPC, persistent worker controls and scoped instrumentation, JSONL reconstruction, multi-run registration/control routing, and semantic train motion. The browser test launches two simultaneous runtimes, switches between them, enters and exits a nested Yard, and verifies assets, demo-mode loading, mascot interaction, recursive Operator topology, Yard/Operator switching, and day/night rendering with a real Chromium browser.
+Published output targets ordinary Node.js 22 and must not depend on Bun at runtime.
 
-**Live intervention validation (CLI 0.144.4, 2026-07-15):** a real remote Codex TUI spawned a sleeping native child (`Cicero`). `watchdog stop Cicero` interrupted it, automatically steered the active root, returned `parentNotified: true`, and the root acknowledged the stop and exited its wait without requiring the operator to type a follow-up. Remote mode is interactive-only in this CLI; `codex exec --remote` is not supported.
+## Contributing
 
-Control requests are bounded: local Watchdog socket actions time out instead of hanging forever, Codex RPC requests have their own deadline, and an unexpected App Server disconnect rejects pending work immediately. For a nested `root → child → grandchild` stop, Watchdog notifies the steerable root but reports `parentNotified: false` because Codex does not permit direct input to the immediate native-child parent.
+Bug reports, focused feature proposals, and pull requests are welcome through [GitHub Issues](https://github.com/awesamarth/watchdog/issues). Please preserve adapter capability boundaries: never expose a control the underlying harness cannot truthfully perform.
 
-**Live Pi validation (Pi 0.80.10, 2026-07-19):** a Watchdog-owned Pi root spawned a persistent RPC worker, captured its streamed/final response, effective model/thinking level, tokens, and provider-reported dollar cost, then received its result. A nested `root → Parent → Nested` run completed without deadlocking: Parent entered `waiting`, yielded its concurrency slot, and resumed after Nested finished. `watchdog stop Sleeper` aborted a real worker and unblocked the root automatically. A worker retry changed Luna from `low` to `minimal`, preserved the stable worker identity, and produced a second verified response; the trace recorded both requested and effective configurations.
+## License
 
-## Cross-harness adapter boundary
-
-`HarnessAdapter` is the seam for Codex, Pi, and future Claude Code support. Each adapter identifies its harness, transport, and mode; emits the same normalized `WatchdogEvent` values; and publishes per-agent capabilities for observe, steer, follow-up, interrupt, retry, and model override. Loop policy, the TUI, and the dashboard consume that contract instead of harness protocol details.
-
-Current adapters:
-
-- Codex App Server: live native root/child events and capability-aware controls for Watchdog-owned runs.
-- Codex JSONL: near-live observation with every mutation capability explicitly unavailable.
-- Pi extension + RPC: native root extension events plus persistent controllable subprocess workers, including nested topology.
-- Deterministic simulation: demo/rehearsal only and always labeled as such.
+[MIT](LICENSE)

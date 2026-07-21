@@ -1,7 +1,10 @@
 type AgentConfig = { model?: string; effort?: string };
 type AgentMessage = { id: string; text: string; at: string };
 type StreamingAgentMessage = { itemId: string; text: string; startedAt: string; updatedAt: string };
+type AgentActivity = { id: string; tool: string; status: string; at: string };
 type Capability = { available: boolean; reason?: string };
+type ExecutionTargetCapabilities = { pause: Capability; stop: Capability; retry: Capability };
+export type ExecutionCapabilities = ExecutionTargetCapabilities & { nodes: Record<string, ExecutionTargetCapabilities> };
 export type AgentCapabilities = {
   observe: Capability;
   steer: Capability;
@@ -31,6 +34,7 @@ export type ExecutionGraphState = {
   ownerThreadId: string;
   label?: string;
   objective?: string;
+  policy?: { verifier?: string; maxTokens?: number; maxIterations?: number };
   source: { kind: "harness" | "watchdog" | "operator" | "legacy" | "inferred"; label?: string };
   authority: ExecutionAuthority;
   parentExecutionId?: string;
@@ -40,6 +44,7 @@ export type ExecutionGraphState = {
   entryNodeIds: string[];
   terminalNodeIds: string[];
   status: "pending" | "running" | "waiting" | "blocked" | "completed" | "failed" | "stopped";
+  incompleteReason?: string;
   iteration: number;
   activations: NodeActivation[];
   traversals: Array<{ id: string; edgeId: string; from: string; to: string; iteration: number; at: string }>;
@@ -47,6 +52,9 @@ export type ExecutionGraphState = {
   startedAt?: string;
   completedAt?: string;
   stopReason?: string;
+  evidence: Array<{ id: string; iteration: number; summary: string; source: string; threadId: string; nodeId?: string; at: string }>;
+  verification: { status: "not-run" | "running" | "passed" | "failed"; summary?: string; at?: string };
+  usedTokens: number;
   warnings: string[];
 };
 
@@ -60,11 +68,14 @@ export type AgentState = {
   status: string;
   activeTurnId?: string;
   totalTokens?: number;
+  inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
   requested?: AgentConfig & { prompt?: string };
   effective?: AgentConfig;
   latestActivity?: { tool: string; status: string };
+  activities?: AgentActivity[];
+  activityCount?: number;
   task?: string;
   latestMessage?: string;
   messages?: AgentMessage[];
@@ -73,6 +84,7 @@ export type AgentState = {
   execution?: { executionId: string; nodeId: string; activationId: string };
   startedAt?: string;
   lastActivityAt?: string;
+  lastTurnCompletedAt?: string;
 };
 
 export type LoopState = {
@@ -96,6 +108,7 @@ export type RunSnapshot = {
   executions: ExecutionGraphState[];
   adapter?: AdapterDescriptor;
   capabilities?: Record<string, AgentCapabilities>;
+  executionCapabilities?: Record<string, ExecutionCapabilities>;
 };
 type RunListItem = {
   runId: string;

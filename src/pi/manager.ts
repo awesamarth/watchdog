@@ -39,6 +39,7 @@ export type PiWorkerView = {
   model?: string;
   thinking?: PiThinkingLevel;
   totalTokens: number;
+  inputTokens: number;
   outputTokens: number;
   costUsd: number;
   latestMessage?: string;
@@ -295,6 +296,7 @@ export class PiWorkerManager {
       currentMessageId: undefined,
       operationTail: Promise.resolve(),
       totalTokens: 0,
+      inputTokens: 0,
       outputTokens: 0,
       costUsd: 0,
     };
@@ -451,12 +453,14 @@ export class PiWorkerManager {
       const input = numeric(usage.input) + numeric(usage.cacheRead) + numeric(usage.cacheWrite);
       const output = numeric(usage.output);
       worker.totalTokens += input + output;
+      worker.inputTokens += input;
       worker.outputTokens += output;
       worker.costUsd += numeric(object(usage.cost).total);
       this.options.emit({
         type: "tokens.updated",
         threadId: worker.id,
         totalTokens: worker.totalTokens,
+        inputTokens: worker.inputTokens,
         outputTokens: worker.outputTokens,
         costUsd: worker.costUsd,
       });
@@ -645,6 +649,7 @@ function workerView(worker: PiWorker): PiWorkerView {
     model: worker.model,
     thinking: worker.thinking,
     totalTokens: worker.totalTokens,
+    inputTokens: worker.inputTokens,
     outputTokens: worker.outputTokens,
     costUsd: worker.costUsd,
     latestMessage: worker.latestMessage,

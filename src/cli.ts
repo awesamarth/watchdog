@@ -25,15 +25,18 @@ if (command === "codex") {
 } else if (command === "dashboard") {
   const { runDashboard } = await import("./server/dashboard.js");
   await runDashboard(args);
-} else if (command === "demo") {
-  const { runDeterministicDemo } = await import("./runtime/demo.js");
-  await runDeterministicDemo(args);
 } else if (command === "doctor") {
   const { runDoctor } = await import("./runtime/doctor.js");
   await runDoctor();
 } else if (command === "observe") {
   const { runJsonlObserver } = await import("./runtime/observe.js");
   await runJsonlObserver(args);
+} else if (command === "traces") {
+  const { printRunTraces } = await import("./runtime/replay.js");
+  await printRunTraces(args.includes("--all") ? undefined : 20);
+} else if (command === "replay") {
+  const { runTraceReplay } = await import("./runtime/replay.js");
+  await runTraceReplay(args);
 } else if (command === "mcp") {
   const { runWatchdogMcp } = await import("./mcp/server.js");
   await runWatchdogMcp(args);
@@ -74,10 +77,11 @@ Usage:
   watchdog pi [any normal Pi arguments]
   watchdog tui [--run <id>]
   watchdog dashboard [--port <port>]
-  watchdog demo [--port <port>]
   watchdog doctor
   watchdog runs
   watchdog observe [--once] [--session <id>] [--sessions-root <path>]
+  watchdog traces [--all]
+  watchdog replay [latest|trace.jsonl] [--harness <name>]
   watchdog ps | tree | inspect <agent> [--run <id>]
   watchdog steer <root|agent> <message> [--run <id>]
   watchdog follow-up <root|agent> <message> [--run <id>]
@@ -91,19 +95,21 @@ Usage:
   watchdog execution start <execution> <node> [--agent <agent>] [--iteration <n>] [--activation <id>] [--run <id>]
   watchdog execution finish-node <execution> <node> <activation> <pass|fail|stop> [summary] [--run <id>]
   watchdog execution edge <execution> <edge> [--iteration <n>] [--traversal <id>] [--run <id>]
+  watchdog execution evidence <execution> <summary> [--agent <agent>] [--node <node>] [--run <id>]
+  watchdog execution verify <execution> <pass|fail> [summary] [--run <id>]
+  watchdog execution stop <execution> [--node <node>] [reason] [--run <id>]
+  watchdog execution retry-node <execution> <node> [--model <model>] [--effort <effort>] <message> [--run <id>]
   watchdog execution finish <execution> <complete|fail|stop|block> [reason] [--run <id>]
 
 Examples:
   watchdog codex
   watchdog pi
-  watchdog demo
   watchdog doctor
   watchdog codex "Use two subagents to inspect this repository."
   watchdog codex --model gpt-5.6-terra
 
 Run watchdog codex or watchdog pi in one terminal, then use watchdog tui or the
-operator commands above from another terminal in the same project.
-watchdog demo is a clearly labeled local simulation for rehearsals.`);
+operator commands above from another terminal in the same project.`);
   process.exitCode = command && !["help", "--help", "-h"].includes(command) ? 1 : 0;
 }
 }
@@ -250,6 +256,73 @@ async function executionCommand(values: string[], runId?: string): Promise<void>
       else throw new Error(`Unknown execution edge option ${flag}`);
     }
     console.log(JSON.stringify(await requestControl({ action: "execution.edge.select", executionId, edgeId, traversalId, iteration }, { runId }), null, 2));
+    return;
+  }
+  if (subcommand === "evidence") {
+    let agent = "root";
+    let nodeId: string | undefined;
+    const summary: string[] = [];
+    while (values.length) {
+      const value = values.shift()!;
+      if (value === "--agent") agent = required(values.shift(), "--agent needs a value");
+      else if (value === "--node") nodeId = required(values.shift(), "--node needs a value");
+      else summary.push(value);
+    }
+    console.log(JSON.stringify(await requestControl({
+      action: "execution.evidence",
+      executionId,
+      agent,
+      nodeId,
+      summary: required(summary.join(" "), "Usage: watchdog execution evidence <execution> <summary> [--agent <agent>] [--node <node>]"),
+    }, { runId }), null, 2));
+    return;
+  }
+  if (subcommand === "verify") {
+    const raw = required(values.shift(), "Usage: watchdog execution verify <execution> <pass|fail> [summary]");
+    if (raw !== "pass" && raw !== "fail") throw new Error("Verification status must be pass or fail");
+    console.log(JSON.stringify(await requestControl({
+      action: "execution.verify",
+      executionId,
+      status: raw === "pass" ? "passed" : "failed",
+      summary: values.join(" ") || undefined,
+    }, { runId }), null, 2));
+    return;
+  }
+  if (subcommand === "stop") {
+    let nodeId: string | undefined;
+    const reason: string[] = [];
+    while (values.length) {
+      const value = values.shift()!;
+      if (value === "--node") nodeId = required(values.shift(), "--node needs a value");
+      else reason.push(value);
+    }
+    console.log(JSON.stringify(await requestControl({
+      action: "execution.stop",
+      executionId,
+      nodeId,
+      reason: reason.join(" ") || undefined,
+    }, { runId }), null, 2));
+    return;
+  }
+  if (subcommand === "retry-node") {
+    const nodeId = required(values.shift(), "Usage: watchdog execution retry-node <execution> <node> [options] <message>");
+    let model: string | undefined;
+    let effort: string | undefined;
+    const message: string[] = [];
+    while (values.length) {
+      const value = values.shift()!;
+      if (value === "--model") model = required(values.shift(), "--model needs a value");
+      else if (value === "--effort") effort = required(values.shift(), "--effort needs a value");
+      else message.push(value);
+    }
+    console.log(JSON.stringify(await requestControl({
+      action: "execution.node.retry",
+      executionId,
+      nodeId,
+      model,
+      effort,
+      message: required(message.join(" "), "A node retry message is required"),
+    }, { runId }), null, 2));
     return;
   }
   if (subcommand === "finish") {

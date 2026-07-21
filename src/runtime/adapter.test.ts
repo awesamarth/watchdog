@@ -76,4 +76,55 @@ describe("normalized harness adapter boundary", () => {
       nodes: [expect.objectContaining({ label: "AUDIT" }), expect.objectContaining({ label: "SHIP" })],
     });
   });
+
+  it("derives graph controls from live adapter capabilities and stops or retries concrete nodes", async () => {
+    const state = new RuntimeState();
+    state.apply({ type: "thread.started", threadId: "root", kind: "root" });
+    state.apply({ type: "turn.started", threadId: "root", turnId: "root-turn" });
+    const adapter = new FakeAdapter();
+    const record = vi.fn((event) => state.apply(event));
+    const handlers = createRuntimeControlHandlers(adapter, state, record);
+    await handlers.declareExecution?.({
+      id: "repair",
+      ownerThreadId: "root",
+      source: { kind: "operator" },
+      authority: "declared",
+      nodes: [{ id: "patch", label: "PATCH", kind: "action" }],
+      edges: [],
+      entryNodeIds: ["patch"],
+      terminalNodeIds: ["patch"],
+    });
+    await handlers.startExecutionNode?.({
+      executionId: "repair",
+      nodeId: "patch",
+      activationId: "patch-1",
+      agent: "root",
+    });
+
+    expect(handlers.snapshot().executionCapabilities?.repair?.stop.available).toBe(true);
+    await handlers.stopExecution?.("repair", undefined, "operator stop");
+    expect(adapter.interrupt).toHaveBeenCalledWith(expect.objectContaining({ threadId: "root" }));
+    expect(handlers.snapshot().executions[0]).toMatchObject({
+      status: "stopped",
+      activations: [expect.objectContaining({ id: "patch-1", status: "stopped" })],
+    });
+
+    expect(handlers.snapshot().executionCapabilities?.repair?.nodes.patch?.retry.available).toBe(true);
+    await handlers.retryExecutionNode?.({
+      executionId: "repair",
+      nodeId: "patch",
+      message: "Try the patch again with the retained findings",
+    });
+    expect(adapter.retry).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "root" }),
+      expect.objectContaining({ message: "Try the patch again with the retained findings" }),
+    );
+    expect(handlers.snapshot().executions[0]).toMatchObject({
+      status: "running",
+      activations: [
+        expect.objectContaining({ id: "patch-1", status: "stopped" }),
+        expect.objectContaining({ status: "running", threadIds: ["root"] }),
+      ],
+    });
+  });
 });

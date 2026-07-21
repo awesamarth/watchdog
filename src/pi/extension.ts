@@ -97,11 +97,16 @@ const ExecutionToolParameters = Type.Object({
     Type.Literal("start_node"),
     Type.Literal("complete_node"),
     Type.Literal("select_edge"),
+    Type.Literal("evidence"),
+    Type.Literal("verify"),
     Type.Literal("complete"),
   ]),
   executionId: Type.Optional(Type.String({ minLength: 1 })),
   label: Type.Optional(Type.String()),
   objective: Type.Optional(Type.String()),
+  verifier: Type.Optional(Type.String()),
+  maxTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  maxIterations: Type.Optional(Type.Integer({ minimum: 1 })),
   parentExecutionId: Type.Optional(Type.String()),
   parentNodeId: Type.Optional(Type.String()),
   nodes: Type.Optional(Type.Array(ExecutionNodeSchema, { minItems: 1 })),
@@ -193,7 +198,9 @@ function registerExecutionTool(pi: ExtensionAPI, singleton: ExtensionSingleton):
       "Use update only when the real workflow discovers or adds nodes and edges at runtime; do not rewrite history or manufacture detail.",
       "Call start_node and complete_node at actual stage boundaries, and select_edge for the transition taken. Reuse one activationId for that node attempt.",
       "A cycle is a loop. Increment iteration when another pass begins. Use a subgraph node plus parentExecutionId/parentNodeId when a stage owns a nested workflow.",
+      "Declare verifier and token/iteration budgets when they are real, then record explicit evidence and verification outcomes instead of treating commentary as proof.",
       "If the internal shape is unknown, declare one honest opaque action node instead of guessing hidden steps.",
+      "Before returning the final response, complete every started node and then complete the execution; close failure and stop paths explicitly too.",
     ],
     parameters: ExecutionToolParameters,
     async execute(_toolCallId, params) {
@@ -308,6 +315,7 @@ function registerRootEventHandlers(pi: ExtensionAPI, singleton: ExtensionSinglet
   let activeTurnId: string | undefined;
   let activeMessageId: string | undefined;
   let totalTokens = 0;
+  let inputTokens = 0;
   let outputTokens = 0;
   let costUsd = 0;
 
@@ -363,9 +371,10 @@ function registerRootEventHandlers(pi: ExtensionAPI, singleton: ExtensionSinglet
     const input = numeric(usage.input) + numeric(usage.cacheRead) + numeric(usage.cacheWrite);
     const output = numeric(usage.output);
     totalTokens += input + output;
+    inputTokens += input;
     outputTokens += output;
     costUsd += numeric(object(usage.cost).total);
-    ingest({ type: "tokens.updated", threadId: runtime.rootId, totalTokens, outputTokens, costUsd });
+    ingest({ type: "tokens.updated", threadId: runtime.rootId, totalTokens, inputTokens, outputTokens, costUsd });
     activeMessageId = undefined;
   });
   pi.on("tool_execution_start", (event, ctx) => {
@@ -558,6 +567,7 @@ function normalizeExecutionOperation(params: ExecutionToolParameters): PiExecuti
       executionId: params.executionId?.trim() || (params.action === "declare" ? `pi-execution-${randomUUID()}` : ""),
       label: params.label?.trim() || undefined,
       objective: params.objective?.trim() || undefined,
+      policy: executionPolicy(params),
       nodes,
       edges,
       entryNodeIds: params.entryNodeIds,
@@ -616,6 +626,25 @@ function normalizeExecutionOperation(params: ExecutionToolParameters): PiExecuti
       iteration: params.iteration,
     };
   }
+  if (params.action === "evidence") {
+    return {
+      action: "evidence",
+      executionId,
+      nodeId: params.nodeId?.trim() || undefined,
+      summary: requiredParameter(params.summary, "evidence requires summary."),
+    };
+  }
+  if (params.action === "verify") {
+    if (params.status !== "passed" && params.status !== "failed") {
+      throw new Error("verify status must be passed or failed.");
+    }
+    return {
+      action: "verify",
+      executionId,
+      status: params.status,
+      summary: params.summary?.trim() || undefined,
+    };
+  }
   if (!params.status || !EXECUTION_END_STATUSES.includes(params.status as typeof EXECUTION_END_STATUSES[number])) {
     throw new Error("complete status must be completed, failed, stopped, or blocked.");
   }
@@ -631,6 +660,15 @@ function requiredParameter(value: string | undefined, message: string): string {
   const normalized = value?.trim();
   if (!normalized) throw new Error(message);
   return normalized;
+}
+
+function executionPolicy(params: ExecutionToolParameters) {
+  const policy = {
+    verifier: params.verifier?.trim() || undefined,
+    maxTokens: params.maxTokens,
+    maxIterations: params.maxIterations,
+  };
+  return Object.values(policy).some((value) => value !== undefined) ? policy : undefined;
 }
 
 function updateFooter(singleton: ExtensionSingleton, ctx: ExtensionContext): void {
@@ -680,6 +718,8 @@ function formatExecutionResult(operation: PiExecutionOperation, result: unknown)
   if (operation.action === "complete_node") return `Marked ${operation.nodeId} ${operation.status}.`;
   if (operation.action === "select_edge") return `Recorded transition ${operation.edgeId}.`;
   if (operation.action === "start_iteration") return `Started iteration ${operation.iteration}.`;
+  if (operation.action === "evidence") return `Recorded evidence for execution ${operation.executionId}.`;
+  if (operation.action === "verify") return `Marked execution ${operation.executionId} verification ${operation.status}.`;
   return `Marked execution ${operation.executionId} ${operation.status}.`;
 }
 

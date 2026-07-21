@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import type { AdapterDescriptor } from "../adapters/types.js";
 import type {
   ExecutionGraphDefinition,
+  ExecutionPolicy,
   ExecutionStatus,
   NodeActivationStatus,
 } from "../execution/types.js";
@@ -28,11 +29,15 @@ export type ControlRequest =
   | { action: "loop.evidence"; agent: string; summary: string; source?: string }
   | { action: "loop.verify"; agent: string; status: "passed" | "failed"; summary?: string }
   | { action: "execution.declare"; graph: ExecutionGraphDefinition }
-  | { action: "execution.update"; executionId: string; nodes?: ExecutionGraphDefinition["nodes"]; edges?: ExecutionGraphDefinition["edges"]; entryNodeIds?: string[]; terminalNodeIds?: string[]; objective?: string; label?: string }
+  | { action: "execution.update"; executionId: string; nodes?: ExecutionGraphDefinition["nodes"]; edges?: ExecutionGraphDefinition["edges"]; entryNodeIds?: string[]; terminalNodeIds?: string[]; objective?: string; label?: string; policy?: ExecutionPolicy }
   | { action: "execution.iteration.start"; executionId: string; iteration: number; reason?: string }
   | { action: "execution.node.start"; executionId: string; nodeId: string; activationId: string; agent: string; iteration?: number; status?: "running" | "waiting" }
   | { action: "execution.node.complete"; executionId: string; nodeId: string; activationId: string; status: Exclude<NodeActivationStatus, "queued" | "running" | "waiting">; summary?: string }
   | { action: "execution.edge.select"; executionId: string; edgeId: string; traversalId: string; iteration?: number }
+  | { action: "execution.evidence"; executionId: string; agent: string; nodeId?: string; summary: string; source?: string }
+  | { action: "execution.verify"; executionId: string; status: "passed" | "failed"; summary?: string }
+  | { action: "execution.stop"; executionId: string; nodeId?: string; reason?: string }
+  | { action: "execution.node.retry"; executionId: string; nodeId: string; message: string; model?: string; effort?: string }
   | { action: "execution.complete"; executionId: string; status: Extract<ExecutionStatus, "completed" | "failed" | "stopped" | "blocked">; reason?: string };
 
 export type ControlHandlers = {
@@ -45,11 +50,15 @@ export type ControlHandlers = {
   addEvidence(agent: string, summary: string, source?: string): Promise<unknown>;
   verifyLoop(agent: string, status: "passed" | "failed", summary?: string): Promise<unknown>;
   declareExecution?(graph: ExecutionGraphDefinition): Promise<unknown>;
-  updateExecution?(input: { executionId: string; nodes?: ExecutionGraphDefinition["nodes"]; edges?: ExecutionGraphDefinition["edges"]; entryNodeIds?: string[]; terminalNodeIds?: string[]; objective?: string; label?: string }): Promise<unknown>;
+  updateExecution?(input: { executionId: string; nodes?: ExecutionGraphDefinition["nodes"]; edges?: ExecutionGraphDefinition["edges"]; entryNodeIds?: string[]; terminalNodeIds?: string[]; objective?: string; label?: string; policy?: ExecutionPolicy }): Promise<unknown>;
   startExecutionIteration?(executionId: string, iteration: number, reason?: string): Promise<unknown>;
   startExecutionNode?(input: { executionId: string; nodeId: string; activationId: string; agent: string; iteration?: number; status?: "running" | "waiting" }): Promise<unknown>;
   completeExecutionNode?(input: { executionId: string; nodeId: string; activationId: string; status: Exclude<NodeActivationStatus, "queued" | "running" | "waiting">; summary?: string }): Promise<unknown>;
   selectExecutionEdge?(input: { executionId: string; edgeId: string; traversalId: string; iteration?: number }): Promise<unknown>;
+  addExecutionEvidence?(input: { executionId: string; agent: string; nodeId?: string; summary: string; source?: string }): Promise<unknown>;
+  verifyExecution?(executionId: string, status: "passed" | "failed", summary?: string): Promise<unknown>;
+  stopExecution?(executionId: string, nodeId?: string, reason?: string): Promise<unknown>;
+  retryExecutionNode?(input: { executionId: string; nodeId: string; message: string; model?: string; effort?: string }): Promise<unknown>;
   completeExecution?(executionId: string, status: Extract<ExecutionStatus, "completed" | "failed" | "stopped" | "blocked">, reason?: string): Promise<unknown>;
 };
 
@@ -231,7 +240,7 @@ export async function requestControlAt(path: string, request: ControlRequest, ti
 
 function defaultControlTimeout(action: ControlRequest["action"]): number {
   if (action === "snapshot") return 5_000;
-  if (action === "retry") return 35_000;
+  if (action === "retry" || action === "execution.node.retry") return 35_000;
   return 25_000;
 }
 
@@ -252,6 +261,10 @@ async function dispatch(line: string, handlers: ControlHandlers): Promise<unknow
     case "execution.node.start": return await requiredExecutionHandler(handlers.startExecutionNode, request.action)(request);
     case "execution.node.complete": return await requiredExecutionHandler(handlers.completeExecutionNode, request.action)(request);
     case "execution.edge.select": return await requiredExecutionHandler(handlers.selectExecutionEdge, request.action)(request);
+    case "execution.evidence": return await requiredExecutionHandler(handlers.addExecutionEvidence, request.action)(request);
+    case "execution.verify": return await requiredExecutionHandler(handlers.verifyExecution, request.action)(request.executionId, request.status, request.summary);
+    case "execution.stop": return await requiredExecutionHandler(handlers.stopExecution, request.action)(request.executionId, request.nodeId, request.reason);
+    case "execution.node.retry": return await requiredExecutionHandler(handlers.retryExecutionNode, request.action)(request);
     case "execution.complete": return await requiredExecutionHandler(handlers.completeExecution, request.action)(request.executionId, request.status, request.reason);
   }
 }

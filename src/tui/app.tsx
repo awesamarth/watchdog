@@ -5,7 +5,7 @@ import { requestControl } from "../runtime/control.js";
 import type { ExecutionGraphState } from "../execution/types.js";
 import type { AgentState, RunSnapshot } from "../runtime/state.js";
 
-type Mode = "normal" | "steer" | "followUp" | "retry";
+type Mode = "normal" | "steer" | "followUp" | "retry" | "nodeRetry";
 type PaneFocus = "tree" | "inspector";
 type InspectorLine = { text: string; tone?: "heading" | "section" | "dim" | "live" };
 
@@ -33,10 +33,18 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
   const inspectorPanelWidth = Math.max(30, contentWidth - 1 - treePanelWidth);
   const loop = snapshot.loops[0];
   const execution = primaryExecution(snapshot);
+  const currentExecution = current ? executionForAgent(snapshot, current) : undefined;
+  const executionCapabilities = currentExecution ? snapshot.executionCapabilities?.[currentExecution.id] : undefined;
+  const currentNodeId = currentExecution
+    ? current?.execution?.executionId === currentExecution.id
+      ? current.execution.nodeId
+      : currentExecution.activeNodeIds[0] ?? [...currentExecution.activations].reverse()[0]?.nodeId
+    : undefined;
+  const nodeCapabilities = currentNodeId ? executionCapabilities?.nodes[currentNodeId] : undefined;
   const summaryWarnings = execution?.authority !== "legacy" ? execution?.warnings ?? [] : loop?.warnings ?? [];
   const summaryWarningRows = Math.min(summaryWarnings.length, 2) + (summaryWarnings.length > 2 ? 1 : 0);
   const summaryBlockHeight = execution?.authority !== "legacy"
-    ? execution ? 6 + summaryWarningRows : 0
+    ? execution ? 7 + summaryWarningRows : 0
     : loop ? 7 + summaryWarningRows : 0;
   const mainHeight = Math.max(8, rows - 5 - summaryBlockHeight);
   const inspectorHeight = Math.max(4, mainHeight - 3);
@@ -46,6 +54,9 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
   const visibleInspectorScroll = Math.min(inspectorScroll, maxInspectorScroll);
   const pageStep = inspectorPageStep(inspectorHeight);
   const controls = availableControlHints(capabilities);
+  if (executionCapabilities?.stop.available) controls.push("X stop execution");
+  if (nodeCapabilities?.stop.available) controls.push("d stop node");
+  if (nodeCapabilities?.retry.available) controls.push("n retry node");
   const controlHelp = controls.length ? ` · ${controls.join(" · ")}` : "";
 
   useEffect(() => {
@@ -79,8 +90,10 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
           ? { action: "steer" as const, agent: current.threadId, message: draft }
           : mode === "followUp"
             ? { action: "followUp" as const, agent: current.threadId, message: draft }
-            : { action: "retry" as const, agent: current.threadId, message: draft };
-        const verb = mode === "steer" ? "Steered" : mode === "followUp" ? "Queued follow-up for" : "Retried";
+            : mode === "nodeRetry" && currentExecution && currentNodeId
+              ? { action: "execution.node.retry" as const, executionId: currentExecution.id, nodeId: currentNodeId, message: draft }
+              : { action: "retry" as const, agent: current.threadId, message: draft };
+        const verb = mode === "steer" ? "Steered" : mode === "followUp" ? "Queued follow-up for" : mode === "nodeRetry" ? "Retried node for" : "Retried";
         void requestControl(request, { runId }).then(() => setNotice(`${verb} ${agentName(current)}`), (reason: Error) => setNotice(`Action failed: ${reason.message}`));
         setMode("normal"); setDraft("");
         return;
@@ -114,13 +127,27 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
       if (key.home) { setInspectorScroll(0); return; }
       if (key.end) { setInspectorScroll(maxInspectorScroll); return; }
     }
-    if (!controllable && ["s", "f", "r", "x"].includes(input)) { setNotice("Observed JSONL sessions are read-only; relaunch through Watchdog for controls"); return; }
+    if (!controllable && ["s", "f", "r", "x", "X", "d", "n"].includes(input)) { setNotice("Observed and historical sessions are read-only; relaunch through Watchdog for controls"); return; }
     if (input === "s" && current && (capabilities?.steer.available ?? (Boolean(current.activeTurnId) && !current.parentThreadId))) { setMode("steer"); return; }
     if (input === "s" && current) { setNotice(capabilities?.steer.reason ?? "This adapter cannot steer the selected agent"); return; }
     if (input === "f" && current && capabilities?.followUp.available) { setMode("followUp"); return; }
     if (input === "f" && current) { setNotice(capabilities?.followUp.reason ?? "This adapter cannot queue a follow-up for the selected agent"); return; }
     if (input === "r" && current && (capabilities?.retry.available ?? !current.parentThreadId)) { setMode("retry"); return; }
     if (input === "r" && current) { setNotice(capabilities?.retry.reason ?? "This adapter cannot retry the selected agent"); return; }
+    if (input === "n" && current && currentExecution && currentNodeId && nodeCapabilities?.retry.available) { setMode("nodeRetry"); return; }
+    if (input === "n" && currentExecution && currentNodeId) { setNotice(nodeCapabilities?.retry.reason ?? "This execution node cannot be retried"); return; }
+    if (input === "d" && currentExecution && currentNodeId && nodeCapabilities?.stop.available) {
+      void requestControl({ action: "execution.stop", executionId: currentExecution.id, nodeId: currentNodeId, reason: "Node stopped from the Watchdog TUI." }, { runId })
+        .then(() => setNotice(`Stopped node ${currentNodeId}`), (reason: Error) => setNotice(`Action failed: ${reason.message}`));
+      return;
+    }
+    if (input === "d" && currentExecution && currentNodeId) { setNotice(nodeCapabilities?.stop.reason ?? "This execution node cannot be stopped"); return; }
+    if (input === "X" && currentExecution && executionCapabilities?.stop.available) {
+      void requestControl({ action: "execution.stop", executionId: currentExecution.id, reason: "Execution stopped from the Watchdog TUI." }, { runId })
+        .then(() => setNotice(`Stopped execution ${currentExecution.label ?? currentExecution.id}`), (reason: Error) => setNotice(`Action failed: ${reason.message}`));
+      return;
+    }
+    if (input === "X" && currentExecution) { setNotice(executionCapabilities?.stop.reason ?? "This execution cannot be stopped"); return; }
     if (input === "x" && current?.activeTurnId) {
       if (capabilities && !capabilities.interrupt.available) { setNotice(capabilities.interrupt.reason ?? "This adapter cannot stop the selected agent"); return; }
       void requestControl({ action: "interrupt", agent: current.threadId }, { runId }).then((result) => {
@@ -137,7 +164,7 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
   if (error) return <Box borderStyle="round" borderColor="red" padding={1}><Text color="red">{error}</Text></Box>;
 
   return <Box flexDirection="column" paddingX={1} width={columns} height={rows} overflow="hidden">
-    <Box justifyContent="space-between"><Text bold color="yellow">WATCHDOG · {harness}</Text><Text dimColor>loop-first agent control plane</Text></Box>
+    <Box justifyContent="space-between"><Text bold color="yellow">WATCHDOG · {harness}</Text><Text dimColor>SUBAGENTS · LOOPS · EXECUTION GRAPHS</Text></Box>
     <Box marginTop={1} gap={1} height={mainHeight} flexShrink={0}>
       <Box width={treePanelWidth} borderStyle="round" borderColor={paneFocus === "tree" ? "yellow" : "gray"} flexDirection="column" paddingX={1} overflow="hidden">
         <Text bold color={paneFocus === "tree" ? "yellow" : undefined}>RUN TREE</Text>
@@ -160,7 +187,7 @@ export function WatchdogTui({ runId }: { runId?: string }): React.JSX.Element {
         ? <Text wrap="truncate-end" dimColor>{paneFocus === "tree"
           ? `TREE · ↑/↓ or j/k select agent · Tab/→ inspect${controllable ? controlHelp : " · read-only"} · q quit`
           : `INSPECT · ↑/↓ or j/k scroll · PgUp/PgDn half-page · Tab/← tree${controllable ? controlHelp : " · read-only"} · q quit`}</Text>
-        : <Text wrap="truncate-end" color="cyan">{mode === "steer" ? "Steer" : mode === "followUp" ? "Follow up" : "Retry"}: {draft}█  (Enter send, Esc cancel)</Text>}
+        : <Text wrap="truncate-end" color="cyan">{mode === "steer" ? "Steer" : mode === "followUp" ? "Follow up" : mode === "nodeRetry" ? "Retry node" : "Retry"}: {draft}█  (Enter send, Esc cancel)</Text>}
     </Box>
   </Box>;
 }
@@ -189,10 +216,11 @@ function ExecutionSummary({ snapshot }: { snapshot: RunSnapshot }): React.JSX.El
     return active ? `[${node.label}]` : node.label;
   }).join(" → ");
   return <Box marginTop={1} borderStyle="round" borderColor={execution.warnings.length || ["failed", "blocked"].includes(execution.status) ? "yellow" : "gray"} paddingX={1} flexDirection="column" flexShrink={0}>
-    <Text wrap="truncate-end" bold>EXECUTION · {execution.label ?? execution.id} · iteration {execution.iteration || "—"} · {execution.status}</Text>
+    <Text wrap="truncate-end" bold>EXECUTION · {execution.label ?? execution.id} · iteration {execution.iteration || "—"} · {execution.incompleteReason ? "incomplete" : execution.status}</Text>
     <Text wrap="truncate-end">Goal: {execution.objective ?? "not declared"}</Text>
     <Text wrap="truncate-end" dimColor>Nodes: {nodes}</Text>
     <Text wrap="truncate-end" dimColor>Source: {execution.source.label ?? execution.source.kind} · {execution.authority} · {execution.traversals.length} transitions</Text>
+    <Text wrap="truncate-end" dimColor>Verifier: {execution.policy?.verifier ?? (execution.nodes.some((node) => node.kind === "verifier") ? "graph node" : "not declared")} · {execution.verification.status} · Evidence: {execution.evidence.length} · Budget: {formatTokens(execution.usedTokens)}/{formatTokens(execution.policy?.maxTokens)} tokens</Text>
     {warnings.map((warning) => <Text wrap="truncate-end" key={warning} color="yellow">⚠ {warning}</Text>)}
     {execution.warnings.length > warnings.length && <Text wrap="truncate-end" color="yellow">⚠ +{execution.warnings.length - warnings.length} more warnings</Text>}
   </Box>;
@@ -233,14 +261,17 @@ export function buildInspectorLines(agent: AgentState, width: number): Inspector
   add(agent.threadId, "dim");
   add(`Status: ${agent.activeTurnId ? "working" : agent.status}`);
   if (agent.kind) add(`Type: ${agent.kind}`);
-  add(`Tokens: ${formatTokens(agent.totalTokens)} total · ${formatTokens(agent.outputTokens)} output`);
+  add(`Tokens: ${formatTokens(agent.totalTokens)} total · ${formatTokens(agent.inputTokens)} input · ${formatTokens(agent.outputTokens)} output`);
   if (agent.costUsd !== undefined) add(`Cost: $${agent.costUsd.toFixed(4)}`);
-  if (agent.task) section("Task", agent.task);
+  const assignment = agent.task ?? agent.requested?.prompt;
+  if (assignment) section(agent.parentThreadId ? "Assignment" : "Task", assignment);
+  else if (agent.parentThreadId) section("Assignment", "Assignment text unavailable from the harness.", "dim");
   section("Requested", config(agent.requested));
   section("Effective", config(agent.effective));
   if (agent.latestActivity) section("Latest activity", `${agent.latestActivity.tool} · ${agent.latestActivity.status}`);
+  const recentActivities = [...(agent.activities ?? [])].reverse().slice(1, 5);
+  if (recentActivities.length) section("Recent activity", recentActivities.map((activity) => `• ${activity.tool} · ${activity.status}`).join("\n"));
   if (agent.execution) section("Execution", `${agent.execution.executionId} · node ${agent.execution.nodeId} · activation ${agent.execution.activationId}`);
-  if (agent.requested?.prompt && agent.requested.prompt !== agent.task) section("Requested prompt", agent.requested.prompt);
   if (agent.streamingMessage) section("Live response", `${agent.streamingMessage.text}▋`, "live");
 
   const messages = [...(agent.messages ?? [])].reverse();
@@ -314,7 +345,6 @@ function config(value?: { model?: string; effort?: string }): string { return `$
 function harnessName(snapshot: RunSnapshot): string {
   const harness = snapshot.adapter?.harness;
   if (!harness) return "CONNECTING";
-  if (harness === "watchdog-demo") return "DEMO";
   return harness.replace(/[-_]+/g, " ").toUpperCase();
 }
 
@@ -327,4 +357,12 @@ function primaryExecution(snapshot: RunSnapshot): ExecutionGraphState | undefine
         - Number(["running", "waiting", "blocked"].includes(left.status));
       return activeDifference || rank[right.authority] - rank[left.authority];
     })[0];
+}
+
+function executionForAgent(snapshot: RunSnapshot, agent: AgentState): ExecutionGraphState | undefined {
+  if (agent.execution) return snapshot.executions.find((execution) => execution.id === agent.execution?.executionId);
+  return [...snapshot.executions].reverse().find((execution) =>
+    execution.ownerThreadId === agent.threadId
+    || execution.activations.some((activation) => activation.threadIds.includes(agent.threadId)),
+  );
 }

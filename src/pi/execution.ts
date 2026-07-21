@@ -2,6 +2,7 @@ import type { WatchdogEvent } from "../adapters/events.js";
 import type {
   ExecutionEdgeDefinition,
   ExecutionNodeDefinition,
+  ExecutionPolicy,
   ExecutionStatus,
   NodeActivationStatus,
 } from "../execution/types.js";
@@ -13,6 +14,7 @@ export type PiExecutionOperation =
     executionId: string;
     label?: string;
     objective?: string;
+    policy?: ExecutionPolicy;
     parentExecutionId?: string;
     parentNodeId?: string;
     nodes: ExecutionNodeDefinition[];
@@ -25,6 +27,7 @@ export type PiExecutionOperation =
     executionId: string;
     label?: string;
     objective?: string;
+    policy?: ExecutionPolicy;
     nodes?: ExecutionNodeDefinition[];
     edges?: ExecutionEdgeDefinition[];
     entryNodeIds?: string[];
@@ -35,6 +38,8 @@ export type PiExecutionOperation =
   | { action: "start_node"; executionId: string; nodeId: string; activationId: string; iteration?: number; status?: "running" | "waiting" }
   | { action: "complete_node"; executionId: string; nodeId: string; activationId: string; status: Exclude<NodeActivationStatus, "queued" | "running" | "waiting">; summary?: string }
   | { action: "select_edge"; executionId: string; edgeId: string; traversalId: string; iteration?: number }
+  | { action: "evidence"; executionId: string; summary: string; source?: string; nodeId?: string }
+  | { action: "verify"; executionId: string; status: "passed" | "failed"; summary?: string }
   | { action: "complete"; executionId: string; status: Extract<ExecutionStatus, "completed" | "failed" | "stopped" | "blocked">; reason?: string };
 
 export function executePiExecutionOperation(
@@ -59,6 +64,7 @@ export function executePiExecutionOperation(
         ownerThreadId,
         label: operation.label,
         objective: operation.objective,
+        policy: operation.policy,
         source: { kind: "watchdog", label: "Pi execution instrumentation" },
         authority: "declared",
         parentExecutionId: operation.parentExecutionId,
@@ -75,6 +81,7 @@ export function executePiExecutionOperation(
       executionId: operation.executionId,
       label: operation.label,
       objective: operation.objective,
+      policy: operation.policy,
       nodes: operation.nodes,
       edges: operation.edges,
       entryNodeIds: operation.entryNodeIds,
@@ -108,6 +115,22 @@ export function executePiExecutionOperation(
       edgeId: operation.edgeId,
       traversalId: operation.traversalId,
       iteration: operation.iteration,
+    });
+  } else if (operation.action === "evidence") {
+    emit({
+      type: "execution.evidence.collected",
+      executionId: operation.executionId,
+      threadId: ownerThreadId,
+      nodeId: operation.nodeId,
+      summary: operation.summary,
+      source: operation.source ?? "Pi execution instrumentation",
+    });
+  } else if (operation.action === "verify") {
+    emit({
+      type: "execution.verified",
+      executionId: operation.executionId,
+      status: operation.status,
+      summary: operation.summary,
     });
   } else {
     emit({ type: "execution.completed", executionId: operation.executionId, status: operation.status, reason: operation.reason });

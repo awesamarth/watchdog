@@ -5,7 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sirv from "sirv";
 import { WebSocket, WebSocketServer } from "ws";
-import { createDemoSnapshot } from "../demo/adapter.js";
 import { listReachableRuns, requestControlAt, type ControlRequest, type ReachableRun } from "../runtime/control.js";
 import type { RunSnapshot } from "../runtime/state.js";
 
@@ -26,20 +25,17 @@ type DashboardState = {
   runs: RunListItem[];
   selectedRunId?: string;
 };
-type DashboardView = "live" | "demo";
 type ActiveRun = ReachableRun;
-type SocketSubscription = { view: DashboardView; runId?: string; serialized?: string };
-type DashboardOptions = { preferredView?: DashboardView; openBrowser?: boolean };
+type SocketSubscription = { runId?: string; serialized?: string };
+type DashboardOptions = { openBrowser?: boolean };
 
 export async function runDashboard(args: string[], options: DashboardOptions = {}): Promise<void> {
   const port = parsePort(args);
-  const preferredView = options.preferredView ?? "live";
-  const url = dashboardUrl(port, preferredView);
+  const url = `http://127.0.0.1:${port}`;
   const shouldOpenBrowser = options.openBrowser ?? true;
   if (await isWatchdogDashboard(port)) {
     console.log(`[watchdog] dashboard already running: ${url}`);
     if (shouldOpenBrowser) await openBrowser(url);
-    if (preferredView === "demo") await waitForTermination();
     return;
   }
   const preferredCwd = resolve(process.cwd());
@@ -56,8 +52,8 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
       catalog = await runtimeCatalog();
       for (const client of sockets.clients) {
         if (client.readyState !== WebSocket.OPEN) continue;
-        const subscription = subscriptions.get(client) ?? { view: "live" };
-        const serialized = JSON.stringify(dashboardState(catalog, subscription.view, subscription.runId, preferredCwd));
+        const subscription = subscriptions.get(client) ?? {};
+        const serialized = JSON.stringify(dashboardState(catalog, subscription.runId, preferredCwd));
         if (!force && serialized === subscription.serialized) continue;
         subscription.serialized = serialized;
         subscriptions.set(client, subscription);
@@ -70,23 +66,28 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
-      const view = dashboardView(url);
       const requestedRunId = url.searchParams.get("run") ?? undefined;
+      if (request.method === "GET"
+        && request.headers.accept?.includes("text/html")
+        && url.pathname !== "/"
+        && url.pathname !== "/reveal") {
+        response.writeHead(404);
+        response.end("Not found");
+        return;
+      }
       if (url.pathname === "/healthz" && request.method === "GET") {
         return json(response, 200, { service: "watchdog-dashboard" });
       }
       if (url.pathname === "/api/state" && request.method === "GET") {
         catalog = await runtimeCatalog();
-        return json(response, 200, dashboardState(catalog, view, requestedRunId, preferredCwd));
+        return json(response, 200, dashboardState(catalog, requestedRunId, preferredCwd));
       }
       if (url.pathname === "/api/control" && request.method === "POST") {
         catalog = await runtimeCatalog();
-        const visible = dashboardState(catalog, view, requestedRunId, preferredCwd);
+        const visible = dashboardState(catalog, requestedRunId, preferredCwd);
         const selected = catalog.find((run) => run.registration.runId === visible.selectedRunId);
         if (!visible.connected || !selected) {
-          throw new Error(view === "demo"
-            ? "The demo preview is read-only. Run `watchdog demo` to enable rehearsal controls."
-            : "No live Watchdog runtime is connected.");
+          throw new Error("No live Watchdog runtime is connected.");
         }
         const body = await readJson(request) as ControlRequest;
         const result = await requestControlAt(selected.registration.socketPath, body);
@@ -105,8 +106,8 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
   });
   sockets.on("connection", (client, request) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    const subscription: SocketSubscription = { view: dashboardView(url), runId: url.searchParams.get("run") ?? undefined };
-    const serialized = JSON.stringify(dashboardState(catalog, subscription.view, subscription.runId, preferredCwd));
+    const subscription: SocketSubscription = { runId: url.searchParams.get("run") ?? undefined };
+    const serialized = JSON.stringify(dashboardState(catalog, subscription.runId, preferredCwd));
     subscription.serialized = serialized;
     subscriptions.set(client, subscription);
     client.once("close", () => subscriptions.delete(client));
@@ -118,7 +119,6 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
     if (isAddressInUse(error) && await isWatchdogDashboard(port)) {
       console.log(`[watchdog] dashboard already running: ${url}`);
       if (shouldOpenBrowser) await openBrowser(url);
-      if (preferredView === "demo") await waitForTermination();
       return;
     }
     if (isAddressInUse(error)) throw new Error(`Dashboard port ${port} is already in use by another application. Choose another with \`--port <port>\`.`);
@@ -126,12 +126,7 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
   }
   const refreshTimer = setInterval(() => void refresh(), 300);
   console.log(`[watchdog] dashboard: ${url}`);
-  if (preferredView === "demo") {
-    console.log("[watchdog] deterministic simulation is live; controls affect rehearsal state only");
-  } else {
-    console.log(`[watchdog] demo preview: http://127.0.0.1:${port}/demo`);
-    console.log("[watchdog] start `watchdog codex` in another terminal for live data; `watchdog demo` enables interactive rehearsal controls");
-  }
+  console.log("[watchdog] start `watchdog codex` or `watchdog pi` in another terminal for live data and controls");
   if (shouldOpenBrowser) await openBrowser(url);
   await new Promise<void>((resolve) => {
     const close = () => {
@@ -143,10 +138,6 @@ export async function runDashboard(args: string[], options: DashboardOptions = {
     process.once("SIGINT", close);
     process.once("SIGTERM", close);
   });
-}
-
-function dashboardUrl(port: number, view: DashboardView): string {
-  return `http://127.0.0.1:${port}${view === "demo" ? "/demo" : ""}`;
 }
 
 async function isWatchdogDashboard(port: number): Promise<boolean> {
@@ -187,18 +178,6 @@ async function openBrowser(url: string): Promise<void> {
     : `[watchdog] could not open a browser automatically; visit ${url}`);
 }
 
-async function waitForTermination(): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const close = () => {
-      process.off("SIGINT", close);
-      process.off("SIGTERM", close);
-      resolve();
-    };
-    process.once("SIGINT", close);
-    process.once("SIGTERM", close);
-  });
-}
-
 export function dashboardAssetsPath(cwd = process.cwd(), moduleUrl = import.meta.url): string {
   const moduleDirectory = dirname(fileURLToPath(moduleUrl));
   const candidates = [
@@ -224,25 +203,22 @@ function normalizeRunSnapshot(snapshot: RunSnapshot): RunSnapshot {
     ...snapshot,
     agents: snapshot.agents ?? [],
     loops: snapshot.loops ?? [],
-    executions: snapshot.executions ?? [],
+    executions: (snapshot.executions ?? []).map((execution) => ({
+      ...execution,
+      policy: execution.policy ?? {},
+      evidence: execution.evidence ?? [],
+      verification: execution.verification ?? { status: "not-run" },
+      usedTokens: execution.usedTokens ?? 0,
+      warnings: execution.warnings ?? [],
+    })),
   };
 }
 
-function dashboardState(catalog: ActiveRun[], view: DashboardView, requestedRunId: string | undefined, preferredCwd: string): DashboardState {
-  const compatible = catalog.filter((run) => (run.snapshot.adapter ?? run.registration.adapter).transport === "simulation" ? view === "demo" : view === "live");
-  const selected = compatible.find((run) => run.registration.runId === requestedRunId)
-    ?? compatible.find((run) => run.registration.cwd === preferredCwd)
-    ?? compatible[0];
-  const runs = compatible.map(runListItem);
-  if (view === "demo") {
-    if (selected) return { connected: true, snapshot: selected.snapshot, runs, selectedRunId: selected.registration.runId };
-    return {
-      connected: false,
-      snapshot: DEMO_SNAPSHOT,
-      message: "Demo yard · read-only preview · run watchdog demo for controls",
-      runs,
-    };
-  }
+function dashboardState(catalog: ActiveRun[], requestedRunId: string | undefined, preferredCwd: string): DashboardState {
+  const selected = catalog.find((run) => run.registration.runId === requestedRunId)
+    ?? catalog.find((run) => run.registration.cwd === preferredCwd)
+    ?? catalog[0];
+  const runs = catalog.map(runListItem);
   if (!selected) {
     return {
       connected: false,
@@ -269,10 +245,6 @@ function runListItem(run: ActiveRun): RunListItem {
   };
 }
 
-function dashboardView(url: URL): DashboardView {
-  return url.searchParams.get("view") === "demo" ? "demo" : "live";
-}
-
 const EMPTY_SNAPSHOT: RunSnapshot = {
   startedAt: new Date().toISOString(),
   mode: "live",
@@ -280,8 +252,6 @@ const EMPTY_SNAPSHOT: RunSnapshot = {
   loops: [],
   executions: [],
 };
-
-const DEMO_SNAPSHOT = createDemoSnapshot();
 
 function parsePort(args: string[]): number {
   const index = args.indexOf("--port");

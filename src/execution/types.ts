@@ -31,6 +31,7 @@ export type ExecutionGraphDefinition = {
   ownerThreadId: string;
   label?: string;
   objective?: string;
+  policy?: ExecutionPolicy;
   source: ExecutionSource;
   authority: ExecutionAuthority;
   parentExecutionId?: string;
@@ -39,6 +40,28 @@ export type ExecutionGraphDefinition = {
   edges: ExecutionEdgeDefinition[];
   entryNodeIds: string[];
   terminalNodeIds: string[];
+};
+
+export type ExecutionPolicy = {
+  verifier?: string;
+  maxTokens?: number;
+  maxIterations?: number;
+};
+
+export type ExecutionEvidence = {
+  id: string;
+  iteration: number;
+  summary: string;
+  source: string;
+  threadId: string;
+  nodeId?: string;
+  at: string;
+};
+
+export type ExecutionVerification = {
+  status: "not-run" | "running" | "passed" | "failed";
+  summary?: string;
+  at?: string;
 };
 
 export type NodeActivation = {
@@ -63,6 +86,12 @@ type EdgeTraversal = {
 
 export type ExecutionGraphState = ExecutionGraphDefinition & {
   status: ExecutionStatus;
+  /**
+   * Set on snapshots when harness work has gone idle but explicit graph
+   * instrumentation still claims that work is running. This is presentation
+   * truth, not a fabricated completion event.
+   */
+  incompleteReason?: string;
   iteration: number;
   activations: NodeActivation[];
   traversals: EdgeTraversal[];
@@ -70,6 +99,9 @@ export type ExecutionGraphState = ExecutionGraphDefinition & {
   startedAt?: string;
   completedAt?: string;
   stopReason?: string;
+  evidence: ExecutionEvidence[];
+  verification: ExecutionVerification;
+  usedTokens: number;
   warnings: string[];
 };
 
@@ -95,6 +127,7 @@ export function createLegacyLoopGraph(input: {
     ownerThreadId: input.threadId,
     label: input.objective ? "Loop" : undefined,
     objective: input.objective,
+    policy: { verifier: input.verifier },
     source: { kind: "legacy", label: "Watchdog loop metadata" },
     authority: "legacy",
     nodes: [
@@ -174,11 +207,29 @@ export function normalizeExecutionGraph(definition: ExecutionGraphDefinition): E
     ...definition,
     id,
     ownerThreadId,
+    policy: normalizeExecutionPolicy(definition.policy),
     nodes,
     edges,
     entryNodeIds: entryNodeIds.length ? entryNodeIds : [nodes[0]!.id],
     terminalNodeIds,
   };
+}
+
+function normalizeExecutionPolicy(policy?: ExecutionPolicy): ExecutionPolicy {
+  if (!policy) return {};
+  const maxTokens = positiveInteger(policy.maxTokens, "Execution token budget");
+  const maxIterations = positiveInteger(policy.maxIterations, "Execution iteration budget");
+  return {
+    verifier: policy.verifier?.trim() || undefined,
+    maxTokens,
+    maxIterations,
+  };
+}
+
+function positiveInteger(value: number | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be a positive integer.`);
+  return value;
 }
 
 export function executionHasCycle(graph: Pick<ExecutionGraphDefinition, "nodes" | "edges">): boolean {
