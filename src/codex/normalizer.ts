@@ -10,6 +10,8 @@ export class CodexEventNormalizer extends EventEmitter {
   #requestedKnown = new Set<string>();
   #seenItems = new Set<string>();
   #knownThreads = new Set<string>();
+  #threadParents = new Map<string, string | undefined>();
+  #pendingAgentPaths = new Map<string, { enclosingThreadId: string; agentPath?: string; state: string }>();
 
   constructor(private readonly client: CodexAppServerClient) {
     super();
@@ -80,19 +82,23 @@ export class CodexEventNormalizer extends EventEmitter {
       this.emit("event", { type: "agent.activity", threadId: parentThreadId, itemId, at: new Date().toISOString(), ...activity } satisfies WatchdogEvent);
     }
     if (text(item.type) === "subAgentActivity") {
-      // The enclosing notification belongs to the parent. This item is the
-      // authoritative live mapping from Codex's canonical agent path to the
-      // child's thread id.
+      // Codex emits this item from both parent and child viewpoints. Apply its
+      // canonical path only after thread topology proves the enclosing thread
+      // is the item's direct parent; otherwise a child-side back-reference can
+      // accidentally re-parent the root.
       const agentThreadId = text(item.agentThreadId);
       if (parentThreadId && agentThreadId) {
-        this.emit("event", {
-          type: "agent.spawned",
-          parentThreadId,
-          agentThreadId,
+        const mapping = {
+          enclosingThreadId: parentThreadId,
           agentPath: text(item.agentPath),
           state: text(item.kind) ?? lifecycle,
-        } satisfies WatchdogEvent);
-        void this.#observeThread(agentThreadId);
+        };
+        if (this.#threadParents.has(agentThreadId)) {
+          if (this.#threadParents.get(agentThreadId) === parentThreadId) this.#emitAgentPath(agentThreadId, mapping);
+        } else {
+          this.#pendingAgentPaths.set(agentThreadId, mapping);
+          void this.#observeThread(agentThreadId);
+        }
       }
       return;
     }
@@ -120,11 +126,29 @@ export class CodexEventNormalizer extends EventEmitter {
   }
 
   #announceThread(threadId: string, parentThreadId?: string, nickname?: string, role?: string): void {
+    const resolvedParent = parentThreadId ?? this.#threadParents.get(threadId);
+    if (parentThreadId !== undefined || !this.#threadParents.has(threadId)) this.#threadParents.set(threadId, parentThreadId);
     const firstSeen = !this.#knownThreads.has(threadId);
     this.#knownThreads.add(threadId);
-    if (!firstSeen) return;
-    this.emit("event", { type: "thread.started", threadId, parentThreadId, nickname, role, kind: parentThreadId ? "native-child" : "root" } satisfies WatchdogEvent);
-    if (parentThreadId) this.emit("event", { type: "agent.spawned", parentThreadId, agentThreadId: threadId, state: "started" } satisfies WatchdogEvent);
+    if (firstSeen) {
+      this.emit("event", { type: "thread.started", threadId, parentThreadId: resolvedParent, nickname, role, kind: resolvedParent ? "native-child" : "root" } satisfies WatchdogEvent);
+      if (resolvedParent) this.emit("event", { type: "agent.spawned", parentThreadId: resolvedParent, agentThreadId: threadId, state: "started" } satisfies WatchdogEvent);
+    }
+    const pending = this.#pendingAgentPaths.get(threadId);
+    if (pending) {
+      if (resolvedParent !== undefined && pending.enclosingThreadId === resolvedParent) this.#emitAgentPath(threadId, pending);
+      this.#pendingAgentPaths.delete(threadId);
+    }
+  }
+
+  #emitAgentPath(agentThreadId: string, mapping: { enclosingThreadId: string; agentPath?: string; state: string }): void {
+    this.emit("event", {
+      type: "agent.spawned",
+      parentThreadId: mapping.enclosingThreadId,
+      agentThreadId,
+      agentPath: mapping.agentPath,
+      state: mapping.state,
+    } satisfies WatchdogEvent);
   }
 
   async #observeThread(threadId: string): Promise<void> {

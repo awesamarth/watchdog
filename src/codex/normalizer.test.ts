@@ -50,12 +50,18 @@ describe("CodexEventNormalizer", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "agent.activity", threadId: "child", tool: "command · sleep 60", status: "inProgress" }));
   });
 
-  it("maps Codex's canonical agent path to its live child thread", async () => {
+  it("maps canonical paths only when topology proves the item points to a child", () => {
     const client = new FakeClient();
     const events: WatchdogEvent[] = [];
     const normalizer = new CodexEventNormalizer(client as unknown as CodexAppServerClient);
     normalizer.on("event", (event: WatchdogEvent) => events.push(event));
 
+    client.emit("notification", "thread/started", {
+      thread: { id: "root" },
+    });
+    client.emit("notification", "thread/started", {
+      thread: { id: "child", parentThreadId: "root", agentNickname: "Curie" },
+    });
     client.emit("notification", "item/started", {
       threadId: "root",
       item: {
@@ -74,7 +80,21 @@ describe("CodexEventNormalizer", () => {
       agentPath: "/root/runtime",
       state: "started",
     });
-    await vi.waitFor(() => expect(client.request).toHaveBeenCalledWith("thread/read", { threadId: "child", includeTurns: false }));
+    client.emit("notification", "item/started", {
+      threadId: "child",
+      item: {
+        id: "back-reference-1",
+        type: "subAgentActivity",
+        kind: "interacted",
+        agentThreadId: "root",
+        agentPath: "/root",
+      },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: "agent.spawned",
+      parentThreadId: "child",
+      agentThreadId: "root",
+    }));
   });
 
   it("shows the command inside Codex's dynamic exec wrapper", () => {
