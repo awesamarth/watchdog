@@ -80,10 +80,20 @@ export class CodexEventNormalizer extends EventEmitter {
       this.emit("event", { type: "agent.activity", threadId: parentThreadId, itemId, at: new Date().toISOString(), ...activity } satisfies WatchdogEvent);
     }
     if (text(item.type) === "subAgentActivity") {
-      // In this protocol notification the enclosing thread is the child and
-      // `agentThreadId` can refer back to its parent. Read the thread record
-      // instead of guessing edge direction from this activity item.
-      if (parentThreadId) void this.#observeThread(parentThreadId);
+      // The enclosing notification belongs to the parent. This item is the
+      // authoritative live mapping from Codex's canonical agent path to the
+      // child's thread id.
+      const agentThreadId = text(item.agentThreadId);
+      if (parentThreadId && agentThreadId) {
+        this.emit("event", {
+          type: "agent.spawned",
+          parentThreadId,
+          agentThreadId,
+          agentPath: text(item.agentPath),
+          state: text(item.kind) ?? lifecycle,
+        } satisfies WatchdogEvent);
+        void this.#observeThread(agentThreadId);
+      }
       return;
     }
     if (text(item.type) === "collabAgentToolCall") {

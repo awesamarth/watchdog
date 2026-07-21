@@ -172,6 +172,7 @@ Controls must always be adapter- and state-aware. Never display or claim a capab
 ### Codex
 
 - A Watchdog-owned App Server provides live root/child events, output, activity, token updates, and topology. `parentThreadId` from `thread/read` is the topology source of truth.
+- App Server `subAgentActivity` items are the authoritative live mapping between a child thread ID and Codex's canonical agent path (for example `/root/runtime`). The enclosing notification is the parent thread. Preserve this mapping so graph instrumentation and stop notifications can resolve the same child identity the root sees.
 - Root steer, interrupt, and retry work when current turn IDs are valid.
 - Native multi-agent-v2 children accept direct interrupt but reject direct steer/start. They are stop-only today.
 - In a real 2026-07-19 `multi_agent_v1` rehearsal, the root could spawn children but a spawned child received Watchdog MCP instrumentation with no nested-agent spawn tool. Do not ask a Codex child to create a grandchild unless its live tool surface actually exposes delegation. Nested execution graphs can still be real while the root orchestrates their steps; Pi supports true nested worker delegation.
