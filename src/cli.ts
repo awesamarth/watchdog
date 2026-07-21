@@ -70,9 +70,27 @@ if (command === "codex") {
 } else if (command === "execution") {
   await executionCommand(args, takeRunId(args));
 } else {
-  console.log(`Watchdog — local operator control plane for subagents, agent loops, and execution graphs
+  printHelp();
+  process.exitCode = command && !["help", "--help", "-h"].includes(command) ? 1 : 0;
+}
+}
 
-Usage:
+function printHelp(): void {
+  const art = [
+    "██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗██████╗  ██████╗  ██████╗ ",
+    "██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║██╔══██╗██╔═══██╗██╔════╝ ",
+    "██║ █╗ ██║███████║   ██║   ██║     ███████║██║  ██║██║   ██║██║  ███╗",
+    "██║███╗██║██╔══██║   ██║   ██║     ██╔══██║██║  ██║██║   ██║██║   ██║",
+    "╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║██████╔╝╚██████╔╝╚██████╔╝",
+    " ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═════╝  ╚═════╝  ╚═════╝ ",
+  ];
+  const color = process.stdout.isTTY && process.env.NO_COLOR === undefined;
+  const blue = (value: string) => color ? `\u001b[1;38;2;90;169;255m${value}\u001b[0m` : value;
+  const muted = (value: string) => color ? `\u001b[90m${value}\u001b[0m` : value;
+  console.log(art.map(blue).join("\n"));
+  console.log(muted("Control subagents, agentic loops, and execution graphs from one local command center."));
+  console.log("");
+  console.log(`Usage:
   watchdog codex [any normal Codex arguments]
   watchdog pi [any normal Pi arguments]
   watchdog tui [--run <id>]
@@ -110,8 +128,6 @@ Examples:
 
 Run watchdog codex or watchdog pi in one terminal, then use watchdog tui or the
 operator commands above from another terminal in the same project.`);
-  process.exitCode = command && !["help", "--help", "-h"].includes(command) ? 1 : 0;
-}
 }
 
 async function snapshot(runId?: string): Promise<RunSnapshot> { return await requestControl({ action: "snapshot" }, { runId }) as RunSnapshot; }

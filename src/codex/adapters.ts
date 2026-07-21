@@ -74,8 +74,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     try {
       const nestedContext = directParentIsRoot
         ? ""
-        : ` Its immediate parent is native subagent ${agentLabel(directParent)}, which Watchdog cannot steer directly; account for the possibility that it is still waiting.`;
-      await steerActiveRoot(this.client, this.state, activeRoot.threadId, `Watchdog operator intervention: subagent ${agentLabel(target)} was stopped.${nestedContext} Do not continue waiting for it. Re-plan from the evidence you have: continue yourself, delegate a replacement if warranted, or report the limitation.`);
+        : ` Its immediate parent is native subagent ${agentReference(directParent)}, which Watchdog cannot steer directly; account for the possibility that it is still waiting.`;
+      await steerActiveRoot(this.client, this.state, activeRoot.threadId, `Watchdog operator intervention: subagent ${agentReference(target)} was stopped.${nestedContext} Do not continue waiting for it. Re-plan from the evidence you have: continue yourself, delegate a replacement if warranted, or report the limitation.`);
       return {
         stopped: agentLabel(target),
         parentNotified: directParentIsRoot,
@@ -154,4 +154,9 @@ async function steerActiveRoot(client: CodexAppServerClient, state: RuntimeState
 
 function agentLabel(agent: { nickname?: string; agentPath?: string; threadId: string }): string {
   return agent.nickname ?? agent.agentPath ?? agent.threadId.slice(0, 8);
+}
+
+function agentReference(agent: { nickname?: string; agentPath?: string; threadId: string }): string {
+  const identities = [agent.agentPath, agent.nickname].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+  return `${identities.join(" / ") || "unnamed subagent"} (thread ${agent.threadId})`;
 }

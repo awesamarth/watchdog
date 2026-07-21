@@ -21,7 +21,10 @@ describe("Codex interrupt notification routing", () => {
       directParent: "Root",
       notificationTarget: "Root",
     });
-    expect(client.request).toHaveBeenCalledWith("turn/steer", expect.objectContaining({ threadId: "root" }));
+    expect(client.request).toHaveBeenCalledWith("turn/steer", expect.objectContaining({
+      threadId: "root",
+      input: [expect.objectContaining({ text: expect.stringContaining("Curie (thread child)") })],
+    }));
   });
 
   it("does not claim that an unsteerable nested parent was notified", async () => {
